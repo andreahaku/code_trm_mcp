@@ -207,7 +207,8 @@ type Suggestion = {
  * Code quality issues detected by analyzer
  */
 type CodeIssue = {
-  type: "any-type" | "missing-jsdoc" | "magic-number" | "long-function" | "high-complexity" | "no-error-handling";
+  type: "any-type" | "missing-jsdoc" | "magic-number" | "long-function" | "high-complexity" | "no-error-handling"
+      | "large-module" | "deep-nesting" | "impure-function" | "hard-to-mock";
   severity: "error" | "warning" | "info";
   file: string;
   line?: number;
@@ -1200,6 +1201,155 @@ async function analyzeCodeFile(filePath: string): Promise<CodeIssue[]> {
 }
 
 /**
+ * Calculate cyclomatic complexity for a function
+ */
+function calculateCyclomaticComplexity(functionLines: string[]): number {
+  const code = functionLines.join('\n');
+  // Count decision points: if, for, while, case, &&, ||, ?, catch, ??, ?.
+  const decisionPoints = (code.match(/\b(if|for|while|case|catch)\b|\&\&|\|\||\?(?!\?|\.)|\?\?|\?\./g) || []).length;
+  return decisionPoints + 1; // Base complexity is 1
+}
+
+/**
+ * Detect maximum nesting depth in a function
+ */
+function detectMaxNesting(functionLines: string[]): number {
+  let maxNesting = 0;
+  let currentNesting = 0;
+
+  for (const line of functionLines) {
+    // Count opening braces
+    const opens = (line.match(/{/g) || []).length;
+    const closes = (line.match(/}/g) || []).length;
+
+    currentNesting += opens;
+    if (currentNesting > maxNesting) {
+      maxNesting = currentNesting;
+    }
+    currentNesting -= closes;
+  }
+
+  return maxNesting;
+}
+
+/**
+ * Enhanced code analysis with maintainability and testability checks
+ */
+async function analyzeCodeFileEnhanced(filePath: string): Promise<CodeIssue[]> {
+  const issues: CodeIssue[] = [];
+
+  try {
+    const content = await fs.readFile(filePath, "utf8");
+    const lines = content.split(/\r?\n/);
+
+    // 1. Check module size (file length)
+    if (lines.length > 500) {
+      issues.push({
+        type: "large-module",
+        severity: "warning",
+        file: filePath,
+        line: 1,
+        message: `File is ${lines.length} lines long. Consider splitting into focused modules for better maintainability and testability.`,
+        context: "Large files are harder to test, understand, and maintain"
+      });
+    }
+
+    // Run existing checks
+    const basicIssues = await analyzeCodeFile(filePath);
+    issues.push(...basicIssues);
+
+    // 2. Enhanced function analysis with complexity and nesting
+    const functionRegex = /^(?:export\s+)?(?:async\s+)?function\s+([a-zA-Z_][a-zA-Z0-9_]*)/;
+    let functionStart = -1;
+    let functionName = "";
+    let braceCount = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const match = line.match(functionRegex);
+
+      if (match && functionStart === -1) {
+        functionStart = i;
+        functionName = match[1];
+        braceCount = 0;
+      }
+
+      if (functionStart !== -1) {
+        braceCount += (line.match(/{/g) || []).length;
+        braceCount -= (line.match(/}/g) || []).length;
+
+        if (braceCount === 0 && line.includes("}")) {
+          const functionLines = lines.slice(functionStart, i + 1);
+
+          // Check cyclomatic complexity
+          const complexity = calculateCyclomaticComplexity(functionLines);
+          if (complexity > 10) {
+            issues.push({
+              type: "high-complexity",
+              severity: complexity > 15 ? "warning" : "info",
+              file: filePath,
+              line: functionStart + 1,
+              message: `Function '${functionName}' has cyclomatic complexity of ${complexity} (threshold: 10). High complexity makes code harder to test and maintain.`,
+              context: `Consider splitting into smaller functions with single responsibilities`
+            });
+          }
+
+          // Check nesting depth
+          const maxNesting = detectMaxNesting(functionLines);
+          if (maxNesting > 4) {
+            issues.push({
+              type: "deep-nesting",
+              severity: "warning",
+              file: filePath,
+              line: functionStart + 1,
+              message: `Function '${functionName}' has nesting depth of ${maxNesting} (threshold: 4). Deep nesting reduces testability.`,
+              context: "Consider extracting nested logic into separate functions"
+            });
+          }
+
+          // Check for side effects (impure functions)
+          const hasSideEffects = functionLines.some(l =>
+            l.match(/\b(fs\.|console\.|process\.|global\.|localStorage\.|sessionStorage\.|document\.|window\.)/i)
+          );
+          if (hasSideEffects && !functionName.match(/^(log|write|save|update|delete|execute|run|apply|init)/i)) {
+            issues.push({
+              type: "impure-function",
+              severity: "info",
+              file: filePath,
+              line: functionStart + 1,
+              message: `Function '${functionName}' has side effects but name doesn't indicate it. Impure functions are harder to test.`,
+              context: "Consider separating pure logic from side effects, or use naming that indicates side effects"
+            });
+          }
+
+          // Check for hard-to-mock patterns (direct instantiation)
+          const hasDirectInstantiation = functionLines.some(l =>
+            l.match(/new\s+[A-Z][a-zA-Z0-9_]*\(/) && !l.match(/new\s+(Map|Set|Array|Date|Error|Promise)\(/)
+          );
+          if (hasDirectInstantiation && functionLines.length > 10) {
+            issues.push({
+              type: "hard-to-mock",
+              severity: "info",
+              file: filePath,
+              line: functionStart + 1,
+              message: `Function '${functionName}' creates its own dependencies. Consider dependency injection for easier testing.`,
+              context: "Pass dependencies as parameters instead of creating them internally"
+            });
+          }
+
+          functionStart = -1;
+        }
+      }
+    }
+
+  } catch (err) {
+    // Ignore errors in analysis
+  }
+
+  return issues;
+}
+
+/**
  * Generate smart suggestions based on evaluation results and code analysis
  */
 async function generateSuggestions(
@@ -1249,12 +1399,17 @@ async function generateSuggestions(
 
   for (const file of filesToAnalyze) {
     const filePath = path.join(repoPath, "src", file);
-    const issues = await analyzeCodeFile(filePath);
+    const issues = await analyzeCodeFileEnhanced(filePath);
 
     // Group by type
     const anyTypes = issues.filter(i => i.type === "any-type");
     const missingDocs = issues.filter(i => i.type === "missing-jsdoc");
     const magicNumbers = issues.filter(i => i.type === "magic-number");
+    const largeModules = issues.filter(i => i.type === "large-module");
+    const highComplexity = issues.filter(i => i.type === "high-complexity");
+    const deepNesting = issues.filter(i => i.type === "deep-nesting");
+    const impureFunctions = issues.filter(i => i.type === "impure-function");
+    const hardToMock = issues.filter(i => i.type === "hard-to-mock");
 
     if (anyTypes.length > 0) {
       suggestions.push({
@@ -1287,6 +1442,83 @@ async function generateSuggestions(
         category: "code-quality",
         issue: `${magicNumbers.length} magic numbers detected in ${file}`,
         suggestedFix: "Extract magic numbers to named constants",
+        autoFixable: false
+      });
+    }
+
+    // Maintainability: large modules
+    if (largeModules.length > 0) {
+      const moduleIssue = largeModules[0];
+      suggestions.push({
+        priority: "medium",
+        category: "code-quality",
+        issue: moduleIssue.message,
+        locations: [{ file: `src/${file}`, line: moduleIssue.line }],
+        suggestedFix: "Split into focused modules by grouping related functions. Consider domain-driven organization or separation by responsibility (e.g., utils, validation, processing).",
+        autoFixable: false
+      });
+    }
+
+    // Testability: high complexity
+    if (highComplexity.length > 0) {
+      suggestions.push({
+        priority: "high",
+        category: "code-quality",
+        issue: `${highComplexity.length} function(s) in ${file} have high cyclomatic complexity`,
+        locations: highComplexity.slice(0, 3).map(i => ({
+          file: `src/${file}`,
+          line: i.line,
+          snippet: i.message
+        })),
+        suggestedFix: "Reduce complexity by extracting conditional logic into separate functions with clear names. Use early returns, guard clauses, and strategy patterns.",
+        autoFixable: false
+      });
+    }
+
+    // Testability: deep nesting
+    if (deepNesting.length > 0) {
+      suggestions.push({
+        priority: "high",
+        category: "code-quality",
+        issue: `${deepNesting.length} function(s) in ${file} have deep nesting (reduces testability)`,
+        locations: deepNesting.slice(0, 3).map(i => ({
+          file: `src/${file}`,
+          line: i.line,
+          snippet: i.message
+        })),
+        suggestedFix: "Reduce nesting by extracting nested blocks into helper functions. Use early returns and guard clauses to flatten control flow.",
+        autoFixable: false
+      });
+    }
+
+    // Testability: impure functions
+    if (impureFunctions.length > 2) {
+      suggestions.push({
+        priority: "medium",
+        category: "code-quality",
+        issue: `${impureFunctions.length} function(s) in ${file} have side effects but unclear naming`,
+        locations: impureFunctions.slice(0, 3).map(i => ({
+          file: `src/${file}`,
+          line: i.line,
+          snippet: i.message
+        })),
+        suggestedFix: "Separate pure logic from side effects. Use command-query separation: pure functions for calculations, clearly named functions for side effects (e.g., executeX, saveX, logX).",
+        autoFixable: false
+      });
+    }
+
+    // Testability: hard to mock
+    if (hardToMock.length > 0) {
+      suggestions.push({
+        priority: "medium",
+        category: "code-quality",
+        issue: `${hardToMock.length} function(s) in ${file} create dependencies internally (hard to test)`,
+        locations: hardToMock.slice(0, 3).map(i => ({
+          file: `src/${file}`,
+          line: i.line,
+          snippet: i.message
+        })),
+        suggestedFix: "Use dependency injection: pass dependencies as function parameters or constructor arguments instead of instantiating them internally. This enables mocking in tests.",
         autoFixable: false
       });
     }
