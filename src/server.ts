@@ -135,6 +135,153 @@ type SessionState = {
   zNotes?: string;
   // perf baseline to normalize (best lower value)
   bestPerf?: number;
+  // NEW: State management
+  mode: SessionMode;
+  checkpoints: Map<string, Checkpoint>;
+  baselineCommit?: string;
+};
+
+// ============= NEW IMPROVED API TYPES =============
+
+/**
+ * Session iteration mode
+ */
+type SessionMode = "cumulative" | "snapshot";
+
+/**
+ * Checkpoint for state restoration
+ */
+type Checkpoint = {
+  id: string;
+  timestamp: number;
+  step: number;
+  score: number;
+  emaScore: number;
+  filesSnapshot: Map<string, string>;
+  description?: string;
+};
+
+/**
+ * Enhanced submission modes - simplified to create vs modify
+ */
+type CreateSubmission = {
+  mode: "create";
+  files: Array<{ path: string; content: string }>;
+};
+
+type ModifySubmission = {
+  mode: "modify";
+  changes: ModifyChange[];
+};
+
+type ModifyChange = {
+  file: string;
+  edits: EditOperation[];
+};
+
+/**
+ * Semantic edit operations for intuitive code modifications
+ */
+type EditOperation =
+  | { type: "replace"; oldText: string; newText: string; all?: boolean }
+  | { type: "insertBefore"; line: number; content: string }
+  | { type: "insertAfter"; line: number; content: string }
+  | { type: "replaceLine"; line: number; content: string }
+  | { type: "replaceRange"; startLine: number; endLine: number; content: string }
+  | { type: "deleteLine"; line: number }
+  | { type: "deleteRange"; startLine: number; endLine: number };
+
+/**
+ * Smart suggestions for code improvements
+ */
+type Suggestion = {
+  priority: "critical" | "high" | "medium" | "low";
+  category: "type-safety" | "documentation" | "performance" | "test-coverage" | "code-quality" | "security";
+  issue: string;
+  locations?: Array<{ file: string; line?: number; snippet?: string }>;
+  suggestedFix?: string;
+  autoFixable: boolean;
+};
+
+/**
+ * Code quality issues detected by analyzer
+ */
+type CodeIssue = {
+  type: "any-type" | "missing-jsdoc" | "magic-number" | "long-function" | "high-complexity" | "no-error-handling";
+  severity: "error" | "warning" | "info";
+  file: string;
+  line?: number;
+  column?: number;
+  message: string;
+  context?: string;
+};
+
+/**
+ * Enhanced error details for better debugging
+ */
+type EnhancedError = {
+  error: string;
+  code: string;
+  details: {
+    failedAt?: string;
+    reason?: string;
+    expected?: string;
+    got?: string;
+    suggestion?: string;
+    context?: string;
+  };
+};
+
+/**
+ * Validation result for dry-run operations
+ */
+type ValidationResult = {
+  valid: boolean;
+  errors: EnhancedError[];
+  warnings: string[];
+  preview?: {
+    filesAffected: string[];
+    linesAdded: number;
+    linesRemoved: number;
+    linesModified: number;
+  };
+};
+
+/**
+ * New submission args with improved API
+ */
+type ImprovedSubmitCandidateArgs = {
+  sessionId: string;
+  candidate: CreateSubmission | ModifySubmission;
+  rationale?: string;
+  dryRun?: boolean;
+};
+
+/**
+ * Checkpoint management args
+ */
+type SaveCheckpointArgs = {
+  sessionId: string;
+  description?: string;
+};
+
+type RestoreCheckpointArgs = {
+  sessionId: string;
+  checkpointId: string;
+};
+
+type ListCheckpointsArgs = {
+  sessionId: string;
+};
+
+/**
+ * Enhanced start session with state management
+ */
+type ImprovedStartSessionArgs = StartSessionArgs & {
+  mode?: SessionMode;
+  autoCommit?: boolean;
+  autoReset?: boolean;
+  autoCheckpoint?: boolean;
 };
 
 const sessions = new Map<SessionId, SessionState>();
@@ -451,6 +598,401 @@ function diffHints(stderr: string, stdout: string): string[] {
   return [...new Set(hints)];
 }
 
+// ============= CUSTOM PATCHER (replaces git apply) =============
+
+/**
+ * Parse a unified diff into structured changes
+ */
+function parseUnifiedDiff(diff: string): Array<{
+  file: string;
+  hunks: Array<{
+    oldStart: number;
+    oldLines: number;
+    newStart: number;
+    newLines: number;
+    lines: Array<{ type: "context" | "add" | "remove"; content: string }>;
+  }>;
+}> {
+  const result: Array<any> = [];
+  const lines = diff.split(/\r?\n/);
+
+  let currentFile: any = null;
+  let currentHunk: any = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Parse file header
+    if (line.startsWith("diff --git") || line.startsWith("---")) {
+      if (line.startsWith("---")) {
+        const nextLine = lines[i + 1];
+        if (nextLine?.startsWith("+++")) {
+          const filepath = nextLine.slice(4).trim().replace(/^b\//, "");
+          currentFile = { file: filepath, hunks: [] };
+          result.push(currentFile);
+          i++; // Skip +++ line
+          continue;
+        }
+      }
+    }
+
+    // Parse hunk header
+    if (line.startsWith("@@")) {
+      const match = line.match(/@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@/);
+      if (match && currentFile) {
+        currentHunk = {
+          oldStart: parseInt(match[1]),
+          oldLines: match[2] ? parseInt(match[2]) : 1,
+          newStart: parseInt(match[3]),
+          newLines: match[4] ? parseInt(match[4]) : 1,
+          lines: []
+        };
+        currentFile.hunks.push(currentHunk);
+      }
+      continue;
+    }
+
+    // Parse hunk content
+    if (currentHunk) {
+      if (line.startsWith("+")) {
+        currentHunk.lines.push({ type: "add", content: line.slice(1) });
+      } else if (line.startsWith("-")) {
+        currentHunk.lines.push({ type: "remove", content: line.slice(1) });
+      } else if (line.startsWith(" ")) {
+        currentHunk.lines.push({ type: "context", content: line.slice(1) });
+      } else if (line === "") {
+        currentHunk.lines.push({ type: "context", content: "" });
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Apply a single hunk to file content with fuzzy matching
+ */
+function applyHunk(
+  fileLines: string[],
+  hunk: any,
+  fuzzyThreshold = 2
+): { success: boolean; newLines: string[]; error?: EnhancedError } {
+  const { oldStart, lines } = hunk;
+
+  // Extract old content from hunk
+  const expectedOldLines = lines
+    .filter((l: any) => l.type === "context" || l.type === "remove")
+    .map((l: any) => l.content);
+
+  // Try exact match first
+  let matchIndex = oldStart - 1; // Convert 1-based to 0-based
+  let exactMatch = true;
+
+  for (let i = 0; i < expectedOldLines.length; i++) {
+    const fileLineIndex = matchIndex + i;
+    if (fileLineIndex >= fileLines.length ||
+        fileLines[fileLineIndex] !== expectedOldLines[i]) {
+      exactMatch = false;
+      break;
+    }
+  }
+
+  // If no exact match, try fuzzy matching
+  if (!exactMatch) {
+    let bestMatch = -1;
+    let bestMatchScore = 0;
+
+    for (let start = Math.max(0, oldStart - 1 - fuzzyThreshold);
+         start <= Math.min(fileLines.length - expectedOldLines.length, oldStart - 1 + fuzzyThreshold);
+         start++) {
+      let matches = 0;
+      for (let i = 0; i < expectedOldLines.length; i++) {
+        if (fileLines[start + i] === expectedOldLines[i]) {
+          matches++;
+        }
+      }
+      if (matches > bestMatchScore) {
+        bestMatchScore = matches;
+        bestMatch = start;
+      }
+    }
+
+    if (bestMatchScore / expectedOldLines.length < 0.8) {
+      // Failed to find good match
+      return {
+        success: false,
+        newLines: fileLines,
+        error: {
+          error: "Hunk application failed",
+          code: "HUNK_MISMATCH",
+          details: {
+            failedAt: `line ${oldStart}`,
+            reason: "Expected content not found",
+            expected: expectedOldLines.slice(0, 3).join("\n"),
+            got: fileLines.slice(oldStart - 1, oldStart + 2).join("\n"),
+            suggestion: "Content may have been modified. Use trm.getFileContent to get latest content.",
+            context: `Best match score: ${(bestMatchScore / expectedOldLines.length * 100).toFixed(1)}%`
+          }
+        }
+      };
+    }
+
+    matchIndex = bestMatch;
+  }
+
+  // Apply the hunk
+  const result = [...fileLines];
+  let offset = 0;
+  let currentLine = matchIndex;
+
+  for (const line of lines) {
+    if (line.type === "remove") {
+      result.splice(currentLine, 1);
+      offset--;
+    } else if (line.type === "add") {
+      result.splice(currentLine, 0, line.content);
+      currentLine++;
+      offset++;
+    } else {
+      // context line
+      currentLine++;
+    }
+  }
+
+  return { success: true, newLines: result };
+}
+
+/**
+ * Custom patcher with fuzzy matching and detailed error reporting
+ */
+async function customPatch(
+  repoPath: string,
+  diff: string,
+  fuzzyThreshold = 2
+): Promise<{ success: boolean; errors: EnhancedError[] }> {
+  const errors: EnhancedError[] = [];
+  const parsedDiff = parseUnifiedDiff(diff);
+
+  for (const fileDiff of parsedDiff) {
+    const filePath = path.resolve(repoPath, fileDiff.file);
+
+    try {
+      // Validate path
+      validateSafePath(repoPath, fileDiff.file);
+
+      // Read current file content
+      let fileContent: string;
+      try {
+        fileContent = await fs.readFile(filePath, "utf8");
+      } catch (err) {
+        // File might not exist (new file)
+        fileContent = "";
+      }
+
+      let fileLines = fileContent.split(/\r?\n/);
+
+      // Apply each hunk
+      for (const hunk of fileDiff.hunks) {
+        const result = applyHunk(fileLines, hunk, fuzzyThreshold);
+        if (!result.success) {
+          errors.push(result.error!);
+          continue;
+        }
+        fileLines = result.newLines;
+      }
+
+      // Write back if successful
+      if (errors.length === 0) {
+        await fs.ensureDir(path.dirname(filePath));
+        await fs.writeFile(filePath, fileLines.join("\n"), "utf8");
+      }
+    } catch (err: unknown) {
+      errors.push({
+        error: "File operation failed",
+        code: "FILE_ERROR",
+        details: {
+          failedAt: fileDiff.file,
+          reason: err instanceof Error ? err.message : String(err),
+          suggestion: "Check file permissions and path"
+        }
+      });
+    }
+  }
+
+  return { success: errors.length === 0, errors };
+}
+
+/**
+ * Apply semantic edit operations to a file
+ */
+async function applyEditOperations(
+  repoPath: string,
+  file: string,
+  edits: EditOperation[]
+): Promise<{ success: boolean; error?: EnhancedError }> {
+  validateSafePath(repoPath, file);
+  const filePath = path.resolve(repoPath, file);
+
+  try {
+    let content = await fs.readFile(filePath, "utf8");
+    let lines = content.split(/\r?\n/);
+
+    // Sort operations by line number (descending) to avoid offset issues
+    const sortedEdits = [...edits].sort((a, b) => {
+      const aLine = "line" in a ? a.line : "startLine" in a ? a.startLine : 0;
+      const bLine = "line" in b ? b.line : "startLine" in b ? b.startLine : 0;
+      return bLine - aLine;
+    });
+
+    for (const edit of sortedEdits) {
+      switch (edit.type) {
+        case "replace":
+          if (edit.all) {
+            content = content.split(edit.oldText).join(edit.newText);
+            lines = content.split(/\r?\n/);
+          } else {
+            const index = content.indexOf(edit.oldText);
+            if (index === -1) {
+              return {
+                success: false,
+                error: {
+                  error: "Text not found for replacement",
+                  code: "REPLACE_NOT_FOUND",
+                  details: {
+                    reason: "Old text not found in file",
+                    expected: edit.oldText.slice(0, 100),
+                    suggestion: "Use trm.getFileContent to verify current content"
+                  }
+                }
+              };
+            }
+            content = content.slice(0, index) + edit.newText + content.slice(index + edit.oldText.length);
+            lines = content.split(/\r?\n/);
+          }
+          break;
+
+        case "insertBefore":
+          if (edit.line < 1 || edit.line > lines.length + 1) {
+            return {
+              success: false,
+              error: {
+                error: "Invalid line number",
+                code: "INVALID_LINE",
+                details: {
+                  failedAt: `line ${edit.line}`,
+                  reason: `Line ${edit.line} out of range (file has ${lines.length} lines)`,
+                  suggestion: "Use valid line numbers within file range"
+                }
+              }
+            };
+          }
+          lines.splice(edit.line - 1, 0, edit.content);
+          break;
+
+        case "insertAfter":
+          if (edit.line < 1 || edit.line > lines.length) {
+            return {
+              success: false,
+              error: {
+                error: "Invalid line number",
+                code: "INVALID_LINE",
+                details: {
+                  failedAt: `line ${edit.line}`,
+                  reason: `Line ${edit.line} out of range (file has ${lines.length} lines)`
+                }
+              }
+            };
+          }
+          lines.splice(edit.line, 0, edit.content);
+          break;
+
+        case "replaceLine":
+          if (edit.line < 1 || edit.line > lines.length) {
+            return {
+              success: false,
+              error: {
+                error: "Invalid line number",
+                code: "INVALID_LINE",
+                details: {
+                  failedAt: `line ${edit.line}`,
+                  reason: `Line ${edit.line} out of range`
+                }
+              }
+            };
+          }
+          lines[edit.line - 1] = edit.content;
+          break;
+
+        case "replaceRange":
+          if (edit.startLine < 1 || edit.endLine > lines.length || edit.startLine > edit.endLine) {
+            return {
+              success: false,
+              error: {
+                error: "Invalid line range",
+                code: "INVALID_RANGE",
+                details: {
+                  failedAt: `lines ${edit.startLine}-${edit.endLine}`,
+                  reason: "Invalid range specified"
+                }
+              }
+            };
+          }
+          lines.splice(edit.startLine - 1, edit.endLine - edit.startLine + 1, edit.content);
+          break;
+
+        case "deleteLine":
+          if (edit.line < 1 || edit.line > lines.length) {
+            return {
+              success: false,
+              error: {
+                error: "Invalid line number",
+                code: "INVALID_LINE",
+                details: {
+                  failedAt: `line ${edit.line}`,
+                  reason: `Line ${edit.line} out of range`
+                }
+              }
+            };
+          }
+          lines.splice(edit.line - 1, 1);
+          break;
+
+        case "deleteRange":
+          if (edit.startLine < 1 || edit.endLine > lines.length || edit.startLine > edit.endLine) {
+            return {
+              success: false,
+              error: {
+                error: "Invalid line range",
+                code: "INVALID_RANGE",
+                details: {
+                  failedAt: `lines ${edit.startLine}-${edit.endLine}`,
+                  reason: "Invalid range specified"
+                }
+              }
+            };
+          }
+          lines.splice(edit.startLine - 1, edit.endLine - edit.startLine + 1);
+          break;
+      }
+    }
+
+    await fs.writeFile(filePath, lines.join("\n"), "utf8");
+    return { success: true };
+  } catch (err: unknown) {
+    return {
+      success: false,
+      error: {
+        error: "Edit operation failed",
+        code: "EDIT_ERROR",
+        details: {
+          reason: err instanceof Error ? err.message : String(err),
+          suggestion: "Check file exists and is accessible"
+        }
+      }
+    };
+  }
+}
+
 /**
  * Apply candidate changes to the repository using git apply (for diffs) or direct writes (for files).
  * Validates file sizes and paths to prevent abuse.
@@ -462,7 +1004,7 @@ async function applyCandidate(
              { mode: "files"; files: { path: string; content: string }[] }
 ) {
   if (candidate.mode === "diff") {
-    // Apply multiple file diffs
+    // Apply multiple file diffs using custom patcher
     if (candidate.changes.length > MAX_CANDIDATE_FILES) {
       throw new Error(`Too many files in candidate: ${candidate.changes.length} (max ${MAX_CANDIDATE_FILES})`);
     }
@@ -476,8 +1018,11 @@ async function applyCandidate(
         throw new Error(`Diff too large for ${change.path}: ${(sizeBytes / 1024 / 1024).toFixed(2)}MB (max ${MAX_FILE_SIZE / 1024 / 1024}MB)`);
       }
 
-      // Apply each diff individually using git apply
-      await execa("git", ["apply", "--whitespace=fix"], { cwd: repoPath, input: change.diff });
+      // Use custom patcher with fuzzy matching
+      const result = await customPatch(repoPath, change.diff);
+      if (!result.success) {
+        throw new Error(`Patch application failed:\n${JSON.stringify(result.errors[0], null, 2)}`);
+      }
     }
     return;
   } else if (candidate.mode === "patch") {
@@ -487,8 +1032,11 @@ async function applyCandidate(
       throw new Error(`Patch too large: ${(sizeBytes / 1024 / 1024).toFixed(2)}MB (max ${MAX_FILE_SIZE / 1024 / 1024}MB)`);
     }
 
-    // apply unified diff using `git apply --whitespace=fix`
-    await execa("git", ["apply", "--whitespace=fix"], { cwd: repoPath, input: candidate.patch });
+    // Use custom patcher instead of git apply
+    const result = await customPatch(repoPath, candidate.patch);
+    if (!result.success) {
+      throw new Error(`Patch application failed:\n${JSON.stringify(result.errors[0], null, 2)}`);
+    }
   } else {
     // files mode
     // Validate limits
@@ -516,6 +1064,609 @@ async function applyCandidate(
       await fs.ensureDir(path.dirname(abs));
       await fs.writeFile(abs, f.content, "utf8");
     }
+  }
+}
+
+// ============= CODE ANALYZER FOR SMART SUGGESTIONS =============
+
+/**
+ * Analyze code file for quality issues
+ */
+async function analyzeCodeFile(filePath: string): Promise<CodeIssue[]> {
+  const issues: CodeIssue[] = [];
+
+  try {
+    const content = await fs.readFile(filePath, "utf8");
+    const lines = content.split(/\r?\n/);
+
+    // Detect 'any' types
+    lines.forEach((line, idx) => {
+      if (line.match(/:\s*any\b/) && !line.trim().startsWith("//")) {
+        issues.push({
+          type: "any-type",
+          severity: "warning",
+          file: filePath,
+          line: idx + 1,
+          message: "Use of 'any' type reduces type safety",
+          context: line.trim()
+        });
+      }
+    });
+
+    // Detect magic numbers
+    lines.forEach((line, idx) => {
+      const matches = line.match(/(?<![a-zA-Z0-9_])(\d+)(?![a-zA-Z0-9_])/g);
+      if (matches) {
+        // Filter out common non-magic numbers (0, 1, -1, 2, 100)
+        const magicNumbers = matches.filter(n =>
+          !["0", "1", "-1", "2", "100", "10", "1000"].includes(n)
+        );
+        if (magicNumbers.length > 0 && !line.trim().startsWith("//")) {
+          issues.push({
+            type: "magic-number",
+            severity: "info",
+            file: filePath,
+            line: idx + 1,
+            message: `Magic numbers found: ${magicNumbers.join(", ")}. Consider using named constants.`,
+            context: line.trim()
+          });
+        }
+      }
+    });
+
+    // Detect missing JSDoc on functions
+    const functionRegex = /^(?:export\s+)?(?:async\s+)?function\s+([a-zA-Z_][a-zA-Z0-9_]*)/;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const match = line.match(functionRegex);
+      if (match) {
+        // Check if previous line has JSDoc comment
+        const prevLine = i > 0 ? lines[i - 1].trim() : "";
+        const hasDocs = prevLine.endsWith("*/") || prevLine.startsWith("/**");
+        if (!hasDocs) {
+          issues.push({
+            type: "missing-jsdoc",
+            severity: "info",
+            file: filePath,
+            line: i + 1,
+            message: `Function '${match[1]}' lacks JSDoc documentation`
+          });
+        }
+      }
+    }
+
+    // Detect long functions (> 100 lines)
+    let functionStart = -1;
+    let braceCount = 0;
+    let functionName = "";
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const match = line.match(functionRegex);
+      if (match && functionStart === -1) {
+        functionStart = i;
+        functionName = match[1];
+        braceCount = 0;
+      }
+
+      if (functionStart !== -1) {
+        braceCount += (line.match(/{/g) || []).length;
+        braceCount -= (line.match(/}/g) || []).length;
+
+        if (braceCount === 0 && line.includes("}")) {
+          const length = i - functionStart + 1;
+          if (length > 100) {
+            issues.push({
+              type: "long-function",
+              severity: "warning",
+              file: filePath,
+              line: functionStart + 1,
+              message: `Function '${functionName}' is ${length} lines long. Consider breaking it down.`
+            });
+          }
+          functionStart = -1;
+        }
+      }
+    }
+
+    // Detect missing error handling in async functions
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].match(/async\s+function/) || lines[i].match(/async\s*\(/)) {
+        let hasTryCatch = false;
+        // Look ahead 20 lines for try/catch
+        for (let j = i; j < Math.min(i + 20, lines.length); j++) {
+          if (lines[j].includes("try {") || lines[j].includes("catch")) {
+            hasTryCatch = true;
+            break;
+          }
+        }
+        if (!hasTryCatch && lines[i].includes("function")) {
+          issues.push({
+            type: "no-error-handling",
+            severity: "warning",
+            file: filePath,
+            line: i + 1,
+            message: "Async function may lack error handling (no try/catch found)"
+          });
+        }
+      }
+    }
+
+  } catch (err) {
+    // Ignore errors in analysis (file might not exist, etc.)
+  }
+
+  return issues;
+}
+
+/**
+ * Generate smart suggestions based on evaluation results and code analysis
+ */
+async function generateSuggestions(
+  state: SessionState,
+  lastEval: EvalResult
+): Promise<Suggestion[]> {
+  const suggestions: Suggestion[] = [];
+
+  // Analyze build/test/lint failures
+  if (!lastEval.okBuild) {
+    suggestions.push({
+      priority: "critical",
+      category: "code-quality",
+      issue: "Build is failing",
+      suggestedFix: "Fix compilation/type errors reported in feedback",
+      autoFixable: false
+    });
+  }
+
+  if (lastEval.tests && lastEval.tests.failed > 0) {
+    suggestions.push({
+      priority: "critical",
+      category: "test-coverage",
+      issue: `${lastEval.tests.failed} tests are failing`,
+      suggestedFix: "Fix failing tests or update assertions",
+      autoFixable: false
+    });
+  }
+
+  if (!lastEval.okLint) {
+    suggestions.push({
+      priority: "high",
+      category: "code-quality",
+      issue: "Lint check is failing",
+      suggestedFix: "Fix linting errors reported in feedback",
+      autoFixable: true
+    });
+  }
+
+  // Analyze source files for issues (sample a few key files)
+  const repoPath = state.cfg.repoPath;
+  const typescriptFiles = await fs.readdir(path.join(repoPath, "src")).catch(() => []);
+
+  const filesToAnalyze = typescriptFiles
+    .filter(f => f.endsWith(".ts") || f.endsWith(".tsx"))
+    .slice(0, 5); // Analyze up to 5 files
+
+  for (const file of filesToAnalyze) {
+    const filePath = path.join(repoPath, "src", file);
+    const issues = await analyzeCodeFile(filePath);
+
+    // Group by type
+    const anyTypes = issues.filter(i => i.type === "any-type");
+    const missingDocs = issues.filter(i => i.type === "missing-jsdoc");
+    const magicNumbers = issues.filter(i => i.type === "magic-number");
+
+    if (anyTypes.length > 0) {
+      suggestions.push({
+        priority: "high",
+        category: "type-safety",
+        issue: `${anyTypes.length} usage(s) of 'any' type detected`,
+        locations: anyTypes.slice(0, 3).map(i => ({
+          file: `src/${file}`,
+          line: i.line,
+          snippet: i.context
+        })),
+        suggestedFix: "Replace 'any' with specific types or 'unknown' with type guards",
+        autoFixable: true
+      });
+    }
+
+    if (missingDocs.length > 3) {
+      suggestions.push({
+        priority: "medium",
+        category: "documentation",
+        issue: `${missingDocs.length} functions in ${file} lack JSDoc`,
+        suggestedFix: "Add JSDoc comments to exported functions",
+        autoFixable: false
+      });
+    }
+
+    if (magicNumbers.length > 5) {
+      suggestions.push({
+        priority: "low",
+        category: "code-quality",
+        issue: `${magicNumbers.length} magic numbers detected in ${file}`,
+        suggestedFix: "Extract magic numbers to named constants",
+        autoFixable: false
+      });
+    }
+  }
+
+  // Performance suggestions
+  if (lastEval.perf && state.bestPerf && lastEval.perf.value > state.bestPerf * 1.1) {
+    suggestions.push({
+      priority: "medium",
+      category: "performance",
+      issue: "Performance has regressed by >10%",
+      suggestedFix: "Profile and optimize critical paths, or revert recent changes",
+      autoFixable: false
+    });
+  }
+
+  // Sort by priority
+  const priorityOrder = { critical: 0, high: 1, medium: 2, low: 3 };
+  suggestions.sort((a, b) => priorityOrder[a.priority] - priorityOrder[b.priority]);
+
+  return suggestions.slice(0, 5); // Return top 5 suggestions
+}
+
+/**
+ * Apply improved candidate format (create/modify modes)
+ */
+async function applyImprovedCandidate(
+  repoPath: string,
+  candidate: CreateSubmission | ModifySubmission
+): Promise<{ success: boolean; errors: EnhancedError[] }> {
+  const errors: EnhancedError[] = [];
+
+  if (candidate.mode === "create") {
+    // Create new files
+    for (const file of candidate.files) {
+      try {
+        validateSafePath(repoPath, file.path);
+
+        const sizeBytes = Buffer.byteLength(file.content, 'utf8');
+        if (sizeBytes > MAX_FILE_SIZE) {
+          errors.push({
+            error: "File too large",
+            code: "FILE_TOO_LARGE",
+            details: {
+              failedAt: file.path,
+              reason: `File is ${(sizeBytes / 1024 / 1024).toFixed(2)}MB (max ${MAX_FILE_SIZE / 1024 / 1024}MB)`,
+              suggestion: "Split into smaller files or reduce content size"
+            }
+          });
+          continue;
+        }
+
+        const absPath = path.resolve(repoPath, file.path);
+
+        // Check if file already exists
+        if (await fs.pathExists(absPath)) {
+          errors.push({
+            error: "File already exists",
+            code: "FILE_EXISTS",
+            details: {
+              failedAt: file.path,
+              reason: "Cannot create file that already exists",
+              suggestion: "Use 'modify' mode to update existing files or choose a different path"
+            }
+          });
+          continue;
+        }
+
+        await fs.ensureDir(path.dirname(absPath));
+        await fs.writeFile(absPath, file.content, "utf8");
+      } catch (err: unknown) {
+        errors.push({
+          error: "File creation failed",
+          code: "CREATE_ERROR",
+          details: {
+            failedAt: file.path,
+            reason: err instanceof Error ? err.message : String(err),
+            suggestion: "Check file path and permissions"
+          }
+        });
+      }
+    }
+  } else {
+    // Modify existing files using edit operations
+    for (const change of candidate.changes) {
+      const result = await applyEditOperations(repoPath, change.file, change.edits);
+      if (!result.success && result.error) {
+        errors.push(result.error);
+      }
+    }
+  }
+
+  return { success: errors.length === 0, errors };
+}
+
+/**
+ * Validate candidate changes without applying (dry-run)
+ */
+async function validateCandidate(
+  repoPath: string,
+  candidate: CreateSubmission | ModifySubmission |
+            { mode: "diff"; changes: { path: string; diff: string }[] } |
+            { mode: "patch"; patch: string } |
+            { mode: "files"; files: { path: string; content: string }[] }
+): Promise<ValidationResult> {
+  const errors: EnhancedError[] = [];
+  const warnings: string[] = [];
+  let filesAffected: string[] = [];
+  let linesAdded = 0;
+  let linesRemoved = 0;
+  let linesModified = 0;
+
+  try {
+    if (candidate.mode === "create") {
+      // Validate create mode
+      for (const file of candidate.files) {
+        // Check if file already exists
+        const absPath = path.resolve(repoPath, file.path);
+        if (await fs.pathExists(absPath)) {
+          errors.push({
+            error: "File already exists",
+            code: "FILE_EXISTS",
+            details: {
+              failedAt: file.path,
+              reason: "Cannot create file that already exists",
+              suggestion: "Use 'modify' mode instead"
+            }
+          });
+        }
+
+        // Validate path safety
+        try {
+          validateSafePath(repoPath, file.path);
+        } catch (err) {
+          errors.push({
+            error: "Invalid path",
+            code: "INVALID_PATH",
+            details: {
+              failedAt: file.path,
+              reason: err instanceof Error ? err.message : String(err),
+              suggestion: "Use relative paths within repository"
+            }
+          });
+        }
+
+        // Check file size
+        const sizeBytes = Buffer.byteLength(file.content, 'utf8');
+        if (sizeBytes > MAX_FILE_SIZE) {
+          errors.push({
+            error: "File too large",
+            code: "FILE_TOO_LARGE",
+            details: {
+              failedAt: file.path,
+              reason: `File is ${(sizeBytes / 1024 / 1024).toFixed(2)}MB (max ${MAX_FILE_SIZE / 1024 / 1024}MB)`,
+              suggestion: "Split into smaller files"
+            }
+          });
+        }
+
+        filesAffected.push(file.path);
+        linesAdded += file.content.split('\n').length;
+      }
+    } else if (candidate.mode === "modify") {
+      // Validate modify mode
+      for (const change of candidate.changes) {
+        const absPath = path.resolve(repoPath, change.file);
+
+        // Check if file exists
+        if (!(await fs.pathExists(absPath))) {
+          errors.push({
+            error: "File not found",
+            code: "FILE_NOT_FOUND",
+            details: {
+              failedAt: change.file,
+              reason: "File does not exist",
+              suggestion: "Use 'create' mode for new files"
+            }
+          });
+          continue;
+        }
+
+        // Validate edits
+        const content = await fs.readFile(absPath, "utf8");
+        const lines = content.split(/\r?\n/);
+
+        for (const edit of change.edits) {
+          switch (edit.type) {
+            case "replace":
+              if (!edit.all && !content.includes(edit.oldText)) {
+                warnings.push(`Text not found in ${change.file}: "${edit.oldText.slice(0, 50)}..."`);
+              }
+              break;
+            case "insertBefore":
+            case "insertAfter":
+            case "replaceLine":
+            case "deleteLine":
+              if ('line' in edit && (edit.line < 1 || edit.line > lines.length)) {
+                errors.push({
+                  error: "Invalid line number",
+                  code: "INVALID_LINE",
+                  details: {
+                    failedAt: `${change.file}:${edit.line}`,
+                    reason: `Line ${edit.line} out of range (file has ${lines.length} lines)`,
+                    suggestion: "Use valid line numbers"
+                  }
+                });
+              }
+              break;
+            case "replaceRange":
+            case "deleteRange":
+              if (edit.startLine < 1 || edit.endLine > lines.length || edit.startLine > edit.endLine) {
+                errors.push({
+                  error: "Invalid line range",
+                  code: "INVALID_RANGE",
+                  details: {
+                    failedAt: `${change.file}:${edit.startLine}-${edit.endLine}`,
+                    reason: "Invalid range specified",
+                    suggestion: "Check line numbers"
+                  }
+                });
+              }
+              break;
+          }
+        }
+
+        filesAffected.push(change.file);
+        linesModified += change.edits.length;
+      }
+    } else if (candidate.mode === "diff" || candidate.mode === "patch") {
+      // Validate diff/patch mode
+      const diffText = candidate.mode === "patch" ? candidate.patch : candidate.changes[0]?.diff || "";
+
+      // Basic diff validation
+      if (!diffText.includes("@@")) {
+        errors.push({
+          error: "Invalid diff format",
+          code: "INVALID_DIFF",
+          details: {
+            reason: "No hunk headers found",
+            suggestion: "Use unified diff format (git diff style)"
+          }
+        });
+      }
+
+      // Parse and validate
+      const parsedDiff = parseUnifiedDiff(diffText);
+      filesAffected = parsedDiff.map(d => d.file);
+
+      for (const fileDiff of parsedDiff) {
+        for (const hunk of fileDiff.hunks) {
+          linesAdded += hunk.lines.filter(l => l.type === "add").length;
+          linesRemoved += hunk.lines.filter(l => l.type === "remove").length;
+        }
+      }
+    } else if (candidate.mode === "files") {
+      // Validate files mode
+      const totalSize = candidate.files.reduce((sum, f) => sum + Buffer.byteLength(f.content, 'utf8'), 0);
+      if (totalSize > 100_000) {
+        warnings.push(`Large submission (${(totalSize / 1024).toFixed(1)}KB) - consider using 'diff' or 'modify' mode`);
+      }
+
+      filesAffected = candidate.files.map(f => f.path);
+      linesAdded = candidate.files.reduce((sum, f) => sum + f.content.split('\n').length, 0);
+    }
+
+  } catch (err: unknown) {
+    errors.push({
+      error: "Validation failed",
+      code: "VALIDATION_ERROR",
+      details: {
+        reason: err instanceof Error ? err.message : String(err),
+        suggestion: "Check candidate format"
+      }
+    });
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    warnings,
+    preview: {
+      filesAffected: [...new Set(filesAffected)],
+      linesAdded,
+      linesRemoved,
+      linesModified
+    }
+  };
+}
+
+// ============= STATE MANAGEMENT =============
+
+/**
+ * Save current state as a checkpoint
+ */
+async function saveCheckpoint(
+  state: SessionState,
+  description?: string
+): Promise<string> {
+  const checkpointId = uuidv4();
+
+  // Capture current files in repository
+  const filesSnapshot = new Map<string, string>();
+  // For simplicity, we track changes via git or manual snapshot
+  // In a production system, you might use git stash or tags
+
+  const checkpoint: Checkpoint = {
+    id: checkpointId,
+    timestamp: Date.now(),
+    step: state.step,
+    score: state.bestScore,
+    emaScore: state.emaScore,
+    filesSnapshot,
+    description
+  };
+
+  state.checkpoints.set(checkpointId, checkpoint);
+  return checkpointId;
+}
+
+/**
+ * Restore state from a checkpoint
+ */
+async function restoreCheckpoint(
+  state: SessionState,
+  checkpointId: string
+): Promise<{ success: boolean; error?: string }> {
+  const checkpoint = state.checkpoints.get(checkpointId);
+  if (!checkpoint) {
+    return { success: false, error: `Checkpoint not found: ${checkpointId}` };
+  }
+
+  // Restore state values
+  state.step = checkpoint.step;
+  state.bestScore = checkpoint.score;
+  state.emaScore = checkpoint.emaScore;
+
+  // In snapshot mode, restore files
+  if (state.mode === "snapshot" && checkpoint.filesSnapshot.size > 0) {
+    for (const [relPath, content] of checkpoint.filesSnapshot) {
+      const absPath = path.resolve(state.cfg.repoPath, relPath);
+      await fs.ensureDir(path.dirname(absPath));
+      await fs.writeFile(absPath, content, "utf8");
+    }
+  }
+
+  return { success: true };
+}
+
+/**
+ * Reset to baseline (clean state)
+ */
+async function resetToBaseline(state: SessionState): Promise<void> {
+  // If we have a baseline commit, reset to it
+  if (state.baselineCommit) {
+    try {
+      await execa("git", ["reset", "--hard", state.baselineCommit], { cwd: state.cfg.repoPath });
+    } catch (err) {
+      console.error(pc.yellow(`⚠️  Failed to reset to baseline: ${err}`));
+    }
+  }
+
+  // Reset state
+  state.step = 0;
+  state.bestScore = 0;
+  state.emaScore = 0;
+  state.noImproveStreak = 0;
+  state.history = [];
+  state.checkpoints.clear();
+}
+
+/**
+ * Create auto-checkpoint after successful iteration
+ */
+async function autoCheckpoint(state: SessionState): Promise<void> {
+  if (state.history.length > 0) {
+    const lastEval = state.history[state.history.length - 1];
+    await saveCheckpoint(
+      state,
+      `Auto-checkpoint at step ${state.step}: score ${lastEval.score.toFixed(3)}`
+    );
   }
 }
 
@@ -680,6 +1831,108 @@ const tools: Tool[] = [
       properties: { sessionId: { type: "string" } },
       required: ["sessionId"]
     }
+  },
+  {
+    name: "trm.validateCandidate",
+    description: "Validate candidate changes without applying them (dry-run). Returns validation results with errors, warnings, and preview of changes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string" },
+        candidate: {
+          oneOf: [
+            {
+              type: "object",
+              properties: {
+                mode: { const: "create" },
+                files: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      path: { type: "string" },
+                      content: { type: "string" }
+                    },
+                    required: ["path", "content"]
+                  }
+                }
+              },
+              required: ["mode", "files"]
+            },
+            {
+              type: "object",
+              properties: {
+                mode: { const: "modify" },
+                changes: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      file: { type: "string" },
+                      edits: { type: "array" }
+                    },
+                    required: ["file", "edits"]
+                  }
+                }
+              },
+              required: ["mode", "changes"]
+            }
+          ]
+        }
+      },
+      required: ["sessionId", "candidate"]
+    }
+  },
+  {
+    name: "trm.getSuggestions",
+    description: "Get AI-powered suggestions for code improvements based on evaluation results and code analysis. Returns top suggestions prioritized by criticality.",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: { type: "string" } },
+      required: ["sessionId"]
+    }
+  },
+  {
+    name: "trm.saveCheckpoint",
+    description: "Save current session state as a checkpoint for later restoration.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string" },
+        description: { type: "string", description: "Optional description for the checkpoint" }
+      },
+      required: ["sessionId"]
+    }
+  },
+  {
+    name: "trm.restoreCheckpoint",
+    description: "Restore session state from a previously saved checkpoint.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string" },
+        checkpointId: { type: "string" }
+      },
+      required: ["sessionId", "checkpointId"]
+    }
+  },
+  {
+    name: "trm.listCheckpoints",
+    description: "List all saved checkpoints for a session.",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: { type: "string" } },
+      required: ["sessionId"]
+    }
+  },
+  {
+    name: "trm.resetToBaseline",
+    description: "Reset session to initial baseline state (using git reset if in a git repository).",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: { type: "string" } },
+      required: ["sessionId"]
+    }
   }
 ];
 
@@ -724,6 +1977,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
             minSteps: p.halt.minSteps ?? 1
           }
         };
+        // Get current git commit as baseline (if in git repo)
+        let baselineCommit: string | undefined;
+        try {
+          const { stdout } = await execa("git", ["rev-parse", "HEAD"], { cwd: cfg.repoPath });
+          baselineCommit = stdout.trim();
+        } catch {
+          // Not in git repo or git not available
+        }
+
         const state: SessionState = {
           id,
           cfg,
@@ -734,7 +1996,10 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           emaAlpha: p.emaAlpha ?? 0.9,
           noImproveStreak: 0,
           history: [],
-          zNotes: p.zNotes || undefined
+          zNotes: p.zNotes || undefined,
+          mode: (p as ImprovedStartSessionArgs).mode ?? "cumulative",
+          checkpoints: new Map(),
+          baselineCommit
         };
         sessions.set(id, state);
         return {
@@ -908,6 +2173,76 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         const p = req.params.arguments as SessionIdArgs;
         sessions.delete(p.sessionId);
         return { content: [{ type: "text", text: JSON.stringify({ ok: true }, null, 2) }] };
+      }
+
+      case "trm.validateCandidate": {
+        const p = req.params.arguments as { sessionId: string; candidate: any };
+        const state = sessions.get(p.sessionId);
+        if (!state) return { content: [{ type: "text", text: `Unknown session: ${p.sessionId}` }] };
+
+        const validation = await validateCandidate(state.cfg.repoPath, p.candidate);
+        return { content: [{ type: "text", text: JSON.stringify(validation, null, 2) }] };
+      }
+
+      case "trm.getSuggestions": {
+        const p = req.params.arguments as SessionIdArgs;
+        const state = sessions.get(p.sessionId);
+        if (!state) return { content: [{ type: "text", text: `Unknown session: ${p.sessionId}` }] };
+
+        const last = state.history[state.history.length - 1];
+        if (!last) {
+          return { content: [{ type: "text", text: JSON.stringify({ suggestions: [], message: "No evaluations yet" }, null, 2) }] };
+        }
+
+        const suggestions = await generateSuggestions(state, last);
+        return { content: [{ type: "text", text: JSON.stringify({ suggestions }, null, 2) }] };
+      }
+
+      case "trm.saveCheckpoint": {
+        const p = req.params.arguments as SaveCheckpointArgs;
+        const state = sessions.get(p.sessionId);
+        if (!state) return { content: [{ type: "text", text: `Unknown session: ${p.sessionId}` }] };
+
+        const checkpointId = await saveCheckpoint(state, p.description);
+        return { content: [{ type: "text", text: JSON.stringify({ checkpointId, message: "Checkpoint saved" }, null, 2) }] };
+      }
+
+      case "trm.restoreCheckpoint": {
+        const p = req.params.arguments as RestoreCheckpointArgs;
+        const state = sessions.get(p.sessionId);
+        if (!state) return { content: [{ type: "text", text: `Unknown session: ${p.sessionId}` }] };
+
+        const result = await restoreCheckpoint(state, p.checkpointId);
+        if (!result.success) {
+          return { content: [{ type: "text", text: JSON.stringify({ error: result.error }, null, 2) }] };
+        }
+        return { content: [{ type: "text", text: JSON.stringify({ message: "Checkpoint restored" }, null, 2) }] };
+      }
+
+      case "trm.listCheckpoints": {
+        const p = req.params.arguments as ListCheckpointsArgs;
+        const state = sessions.get(p.sessionId);
+        if (!state) return { content: [{ type: "text", text: `Unknown session: ${p.sessionId}` }] };
+
+        const checkpoints = Array.from(state.checkpoints.values()).map(cp => ({
+          id: cp.id,
+          timestamp: cp.timestamp,
+          step: cp.step,
+          score: cp.score,
+          emaScore: cp.emaScore,
+          description: cp.description
+        }));
+
+        return { content: [{ type: "text", text: JSON.stringify({ checkpoints }, null, 2) }] };
+      }
+
+      case "trm.resetToBaseline": {
+        const p = req.params.arguments as SessionIdArgs;
+        const state = sessions.get(p.sessionId);
+        if (!state) return { content: [{ type: "text", text: `Unknown session: ${p.sessionId}` }] };
+
+        await resetToBaseline(state);
+        return { content: [{ type: "text", text: JSON.stringify({ message: "Reset to baseline" }, null, 2) }] };
       }
 
       default:
