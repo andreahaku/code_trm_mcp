@@ -72,9 +72,15 @@ type StartSessionArgs = {
 type SubmitCandidateArgs = {
   sessionId: string;
   candidate:
-    | { mode: "files"; files: { path: string; content: string }[] }
-    | { mode: "patch"; patch: string };
+    | { mode: "diff"; changes: { path: string; diff: string }[] }
+    | { mode: "patch"; patch: string }
+    | { mode: "files"; files: { path: string; content: string }[] };
   rationale?: string;
+};
+
+type GetFileContentArgs = {
+  sessionId: string;
+  paths: string[];
 };
 
 type SessionIdArgs = {
@@ -133,9 +139,81 @@ type SessionState = {
 
 const sessions = new Map<SessionId, SessionState>();
 
+// Constants
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB per file
+const MAX_CANDIDATE_FILES = 100; // Maximum files in a single candidate
+
 // ------------- helpers ----------------
 
 function clamp01(x: number) { return Math.max(0, Math.min(1, x)); }
+
+/**
+ * Validate that a path is safe and within the allowed repository.
+ * Prevents path traversal attacks.
+ */
+function validateSafePath(repoPath: string, targetPath: string): void {
+  const resolvedRepo = path.resolve(repoPath);
+  const resolvedTarget = path.resolve(repoPath, targetPath);
+  
+  if (!resolvedTarget.startsWith(resolvedRepo + path.sep) && resolvedTarget !== resolvedRepo) {
+    throw new Error(`Path traversal detected: ${targetPath} escapes repository boundary`);
+  }
+}
+
+/**
+ * Validate startSession arguments.
+ */
+async function validateStartSessionArgs(args: StartSessionArgs): Promise<void> {
+  // Validate repoPath exists and is a directory
+  const stat = await fs.stat(args.repoPath).catch(() => null);
+  if (!stat) {
+    throw new Error(`Repository path does not exist: ${args.repoPath}`);
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(`Repository path is not a directory: ${args.repoPath}`);
+  }
+
+  // Validate weights
+  if (args.weights) {
+    const { build, test, lint, perf } = args.weights;
+    if (build !== undefined && (build < 0 || build > 1)) {
+      throw new Error(`Invalid weight for build: ${build} (must be in [0,1])`);
+    }
+    if (test !== undefined && (test < 0 || test > 1)) {
+      throw new Error(`Invalid weight for test: ${test} (must be in [0,1])`);
+    }
+    if (lint !== undefined && (lint < 0 || lint > 1)) {
+      throw new Error(`Invalid weight for lint: ${lint} (must be in [0,1])`);
+    }
+    if (perf !== undefined && (perf < 0 || perf > 1)) {
+      throw new Error(`Invalid weight for perf: ${perf} (must be in [0,1])`);
+    }
+  }
+
+  // Validate halt parameters
+  if (args.halt.maxSteps < 1) {
+    throw new Error(`maxSteps must be >= 1, got ${args.halt.maxSteps}`);
+  }
+  if (args.halt.passThreshold < 0 || args.halt.passThreshold > 1) {
+    throw new Error(`passThreshold must be in [0,1], got ${args.halt.passThreshold}`);
+  }
+  if (args.halt.patienceNoImprove < 1) {
+    throw new Error(`patienceNoImprove must be >= 1, got ${args.halt.patienceNoImprove}`);
+  }
+  if (args.halt.minSteps !== undefined && args.halt.minSteps < 1) {
+    throw new Error(`minSteps must be >= 1, got ${args.halt.minSteps}`);
+  }
+
+  // Validate emaAlpha
+  if (args.emaAlpha !== undefined && (args.emaAlpha < 0 || args.emaAlpha > 1)) {
+    throw new Error(`emaAlpha must be in [0,1], got ${args.emaAlpha}`);
+  }
+
+  // Validate timeout
+  if (args.timeoutSec !== undefined && args.timeoutSec < 1) {
+    throw new Error(`timeoutSec must be >= 1, got ${args.timeoutSec}`);
+  }
+}
 
 /**
  * Parse a command string into program and arguments, respecting quotes.
@@ -169,6 +247,10 @@ function parseCommand(cmd: string): { bin: string; args: string[] } {
   }
 
   if (current) tokens.push(current);
+  
+  if (inQuote) {
+    throw new Error(`Unclosed quote in command: ${cmd}`);
+  }
 
   if (tokens.length === 0) throw new Error("Empty command");
   const [bin, ...args] = tokens;
@@ -183,6 +265,15 @@ async function runCmd(cmd: string | undefined, cwd: string, timeoutSec: number):
     const { stdout, stderr, exitCode } = await execa(bin, args, { cwd, timeout: timeoutSec * 1000, shell: false });
     return { ok: (exitCode ?? 0) === 0, stdout, stderr, exitCode: exitCode ?? 0 };
   } catch (err: any) {
+    // Handle timeout specifically
+    if (err.timedOut) {
+      return { 
+        ok: false, 
+        stdout: err.stdout ?? "", 
+        stderr: `Command timed out after ${timeoutSec}s\n${err.stderr ?? ""}`, 
+        exitCode: -1 
+      };
+    }
     return { ok: false, stdout: err.stdout ?? "", stderr: err.stderr ?? String(err), exitCode: err.exitCode ?? -1 };
   }
 }
@@ -307,19 +398,65 @@ function diffHints(stderr: string, stdout: string): string[] {
 
 async function applyCandidate(
   repoPath: string,
-  candidate: { mode: "files"; files: { path: string; content: string }[] } |
-             { mode: "patch"; patch: string }
+  candidate: { mode: "diff"; changes: { path: string; diff: string }[] } |
+             { mode: "patch"; patch: string } |
+             { mode: "files"; files: { path: string; content: string }[] }
 ) {
-  if (candidate.mode === "files") {
+  if (candidate.mode === "diff") {
+    // Apply multiple file diffs
+    if (candidate.changes.length > MAX_CANDIDATE_FILES) {
+      throw new Error(`Too many files in candidate: ${candidate.changes.length} (max ${MAX_CANDIDATE_FILES})`);
+    }
+
+    for (const change of candidate.changes) {
+      validateSafePath(repoPath, change.path);
+
+      // Validate diff size
+      const sizeBytes = Buffer.byteLength(change.diff, 'utf8');
+      if (sizeBytes > MAX_FILE_SIZE) {
+        throw new Error(`Diff too large for ${change.path}: ${(sizeBytes / 1024 / 1024).toFixed(2)}MB (max ${MAX_FILE_SIZE / 1024 / 1024}MB)`);
+      }
+
+      // Apply each diff individually using git apply
+      await execa("git", ["apply", "--whitespace=fix"], { cwd: repoPath, input: change.diff });
+    }
+    return;
+  } else if (candidate.mode === "patch") {
+    // Validate patch size
+    const sizeBytes = Buffer.byteLength(candidate.patch, 'utf8');
+    if (sizeBytes > MAX_FILE_SIZE) {
+      throw new Error(`Patch too large: ${(sizeBytes / 1024 / 1024).toFixed(2)}MB (max ${MAX_FILE_SIZE / 1024 / 1024}MB)`);
+    }
+
+    // apply unified diff using `git apply --whitespace=fix`
+    await execa("git", ["apply", "--whitespace=fix"], { cwd: repoPath, input: candidate.patch });
+  } else {
+    // files mode
+    // Validate limits
+    if (candidate.files.length > MAX_CANDIDATE_FILES) {
+      throw new Error(`Too many files in candidate: ${candidate.files.length} (max ${MAX_CANDIDATE_FILES})`);
+    }
+
+    // Warn about large submissions
+    const totalSize = candidate.files.reduce((sum, f) => sum + Buffer.byteLength(f.content, 'utf8'), 0);
+    if (totalSize > 100_000) { // 100KB
+      console.error(pc.yellow(`⚠️  Large submission (${(totalSize/1024).toFixed(1)}KB) - consider using 'diff' or 'patch' mode for efficiency`));
+    }
+
     for (const f of candidate.files) {
+      // Validate path to prevent traversal
+      validateSafePath(repoPath, f.path);
+
+      // Validate file size
+      const sizeBytes = Buffer.byteLength(f.content, 'utf8');
+      if (sizeBytes > MAX_FILE_SIZE) {
+        throw new Error(`File too large: ${f.path} is ${(sizeBytes / 1024 / 1024).toFixed(2)}MB (max ${MAX_FILE_SIZE / 1024 / 1024}MB)`);
+      }
+
       const abs = path.resolve(repoPath, f.path);
       await fs.ensureDir(path.dirname(abs));
       await fs.writeFile(abs, f.content, "utf8");
     }
-    return;
-  } else {
-    // apply unified diff using `git apply --whitespace=fix`
-    await execa("git", ["apply", "--whitespace=fix"], { cwd: repoPath, input: candidate.patch });
   }
 }
 
@@ -382,13 +519,40 @@ const tools: Tool[] = [
   },
   {
     name: "trm.submitCandidate",
-    description: "Apply candidate changes (files or unified diff), run evaluation (build/test/lint/bench), update EMA & state, and return feedback + shouldHalt.",
+    description: "Apply candidate changes and run evaluation. **STRONGLY PREFERRED: Use 'diff' mode (per-file diffs) or 'patch' mode (unified diff) for efficiency.** Use trm.getFileContent first to read current file state, then generate diffs. Only use 'files' mode for new files or complete rewrites (discouraged for large files).",
     inputSchema: {
       type: "object",
       properties: {
         sessionId: { type: "string" },
         candidate: {
           oneOf: [
+            {
+              type: "object",
+              properties: {
+                mode: { const: "diff" },
+                changes: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      path: { type: "string", description: "Relative path to file" },
+                      diff: { type: "string", description: "Unified diff format (git diff style)" }
+                    },
+                    required: ["path", "diff"]
+                  },
+                  description: "Array of per-file diffs in unified format"
+                }
+              },
+              required: ["mode", "changes"]
+            },
+            {
+              type: "object",
+              properties: {
+                mode: { const: "patch" },
+                patch: { type: "string", description: "Complete unified diff (git diff output)" }
+              },
+              required: ["mode", "patch"]
+            },
             {
               type: "object",
               properties: {
@@ -402,24 +566,33 @@ const tools: Tool[] = [
                       content: { type: "string" }
                     },
                     required: ["path", "content"]
-                  }
+                  },
+                  description: "Complete file contents (use only for new files)"
                 }
               },
               required: ["mode", "files"]
-            },
-            {
-              type: "object",
-              properties: {
-                mode: { const: "patch" },
-                patch: { type: "string" }
-              },
-              required: ["mode", "patch"]
             }
           ]
         },
         rationale: { type: "string", description: "LLM notes: why these changes, expected effects, hypotheses" }
       },
       required: ["sessionId", "candidate"]
+    }
+  },
+  {
+    name: "trm.getFileContent",
+    description: "Read current content of files from the repository. Use this before generating diffs to ensure accurate changes. Returns file contents indexed by path.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string" },
+        paths: {
+          type: "array",
+          items: { type: "string" },
+          description: "Relative paths to read from repository (e.g., ['src/server.ts', 'package.json'])"
+        }
+      },
+      required: ["sessionId", "paths"]
     }
   },
   {
@@ -467,9 +640,13 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     switch (req.params.name) {
       case "trm.startSession": {
         const p = req.params.arguments as StartSessionArgs;
+        
+        // Validate input arguments
+        await validateStartSessionArgs(p);
+        
         const id: SessionId = uuidv4();
         const cfg: SessionConfig = {
-          repoPath: p.repoPath,
+          repoPath: path.resolve(p.repoPath),
           buildCmd: p.buildCmd,
           testCmd: p.testCmd,
           lintCmd: p.lintCmd,
@@ -638,6 +815,34 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         if (!last) return { content: [{ type: "text", text: JSON.stringify({ shouldHalt: false, reasons: ["no evaluations yet"] }, null, 2) }] };
         const d = shouldHalt(state, last);
         return { content: [{ type: "text", text: JSON.stringify({ shouldHalt: d.halt, reasons: d.reasons }, null, 2) }] };
+      }
+
+      case "trm.getFileContent": {
+        const p = req.params.arguments as GetFileContentArgs;
+        const state = sessions.get(p.sessionId);
+        if (!state) return { content: [{ type: "text", text: `Unknown session: ${p.sessionId}` }] };
+
+        if (p.paths.length > 50) {
+          throw new Error(`Too many paths requested: ${p.paths.length} (max 50)`);
+        }
+
+        const files: Record<string, string> = {};
+        for (const relPath of p.paths) {
+          validateSafePath(state.cfg.repoPath, relPath);
+          const absPath = path.resolve(state.cfg.repoPath, relPath);
+
+          try {
+            const content = await fs.readFile(absPath, "utf8");
+            files[relPath] = content;
+          } catch (err: any) {
+            // If file doesn't exist, note it
+            files[relPath] = `[File not found: ${err.message}]`;
+          }
+        }
+
+        return {
+          content: [{ type: "text", text: JSON.stringify({ files }, null, 2) }]
+        };
       }
 
       case "trm.endSession": {
