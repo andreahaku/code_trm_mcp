@@ -142,10 +142,38 @@ const sessions = new Map<SessionId, SessionState>();
 // Constants
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB per file
 const MAX_CANDIDATE_FILES = 100; // Maximum files in a single candidate
+const MAX_RATIONALE_LENGTH = 4000; // Maximum length for rationale notes
+const SCORE_IMPROVEMENT_EPSILON = 1e-6; // Minimum improvement threshold
+const MAX_HINT_LINES = 12; // Maximum feedback hint lines
+const MAX_FEEDBACK_ITEMS = 16; // Maximum feedback items in response
+const MAX_FILE_READ_PATHS = 50; // Maximum file paths in single getFileContent request
 
 // ------------- helpers ----------------
 
-function clamp01(x: number) { return Math.max(0, Math.min(1, x)); }
+/**
+ * Type guard to check if an error has expected execa properties.
+ */
+function isExecaError(err: unknown): err is { stdout?: string; stderr?: string; exitCode?: number; timedOut?: boolean } {
+  return (
+    typeof err === 'object' && err !== null &&
+    ('stdout' in err || 'stderr' in err || 'exitCode' in err || 'timedOut' in err)
+  );
+}
+
+/**
+ * Type alias for command execution results.
+ */
+type CommandResult = {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+};
+
+/**
+ * Clamp a number to the range [0, 1].
+ */
+function clamp01(x: number): number { return Math.max(0, Math.min(1, x)); }
 
 /**
  * Validate that a path is safe and within the allowed repository.
@@ -257,27 +285,39 @@ function parseCommand(cmd: string): { bin: string; args: string[] } {
   return { bin, args };
 }
 
-async function runCmd(cmd: string | undefined, cwd: string, timeoutSec: number): Promise<{ ok: boolean; stdout: string; stderr: string; exitCode: number | null }> {
+/**
+ * Execute a command with timeout and error handling.
+ * Returns undefined command as success with empty output.
+ */
+async function runCmd(cmd: string | undefined, cwd: string, timeoutSec: number): Promise<CommandResult> {
   if (!cmd) return { ok: true, stdout: "", stderr: "", exitCode: 0 };
 
   try {
     const { bin, args } = parseCommand(cmd);
     const { stdout, stderr, exitCode } = await execa(bin, args, { cwd, timeout: timeoutSec * 1000, shell: false });
     return { ok: (exitCode ?? 0) === 0, stdout, stderr, exitCode: exitCode ?? 0 };
-  } catch (err: any) {
+  } catch (err: unknown) {
     // Handle timeout specifically
-    if (err.timedOut) {
-      return { 
-        ok: false, 
-        stdout: err.stdout ?? "", 
-        stderr: `Command timed out after ${timeoutSec}s\n${err.stderr ?? ""}`, 
-        exitCode: -1 
+    if (isExecaError(err) && err.timedOut) {
+      return {
+        ok: false,
+        stdout: err.stdout ?? "",
+        stderr: `Command timed out after ${timeoutSec}s\n${err.stderr ?? ""}`,
+        exitCode: -1
       };
     }
-    return { ok: false, stdout: err.stdout ?? "", stderr: err.stderr ?? String(err), exitCode: err.exitCode ?? -1 };
+    if (isExecaError(err)) {
+      return { ok: false, stdout: err.stdout ?? "", stderr: err.stderr ?? String(err), exitCode: err.exitCode ?? -1 };
+    }
+    // Fallback for unexpected errors
+    return { ok: false, stdout: "", stderr: String(err), exitCode: -1 };
   }
 }
 
+/**
+ * Parse test framework output (Jest, Vitest, Mocha) to extract pass/fail counts.
+ * Supports both JSON reporters and text summary formats.
+ */
 function parseTestOutput(raw: string): { passed: number; failed: number; total: number } | null {
   // Try to detect jest/mocha minimal info heuristically
   // Accepts either JSON reporters or summary lines.
@@ -310,6 +350,13 @@ function parseTestOutput(raw: string): { passed: number; failed: number; total: 
   return null;
 }
 
+/**
+ * Compute normalized score from build/test/lint/perf signals.
+ * Note: This function has a side effect of updating state.bestPerf for performance tracking.
+ *
+ * @param state - The session state (modified: bestPerf may be updated)
+ * @param signals - Evaluation signals from various checks
+ */
 function scoreFromSignals(state: SessionState, signals: {
   buildOk: boolean;
   lintOk: boolean;
@@ -353,6 +400,10 @@ function scoreFromSignals(state: SessionState, signals: {
   return score;
 }
 
+/**
+ * Determine if the refinement loop should halt based on score, improvement, and step count.
+ * Implements ACT-like adaptive halting policy.
+ */
 function shouldHalt(state: SessionState, last: EvalResult): { halt: boolean; reasons: string[] } {
   const r: string[] = [];
   const cfg = state.cfg.halt;
@@ -378,6 +429,10 @@ function shouldHalt(state: SessionState, last: EvalResult): { halt: boolean; rea
   return { halt: false, reasons: [] };
 }
 
+/**
+ * Extract actionable error hints from command output (TypeScript, Jest, ESLint patterns).
+ * Returns deduplicated hints limited to avoid overwhelming feedback.
+ */
 function diffHints(stderr: string, stdout: string): string[] {
   const hints: string[] = [];
   const out = `${stdout}\n${stderr}`;
@@ -396,6 +451,10 @@ function diffHints(stderr: string, stdout: string): string[] {
   return [...new Set(hints)];
 }
 
+/**
+ * Apply candidate changes to the repository using git apply (for diffs) or direct writes (for files).
+ * Validates file sizes and paths to prevent abuse.
+ */
 async function applyCandidate(
   repoPath: string,
   candidate: { mode: "diff"; changes: { path: string; diff: string }[] } |
@@ -694,7 +753,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         await applyCandidate(state.cfg.repoPath, p.candidate);
         if (typeof p.rationale === "string" && p.rationale.trim().length) {
           // Keep only the latest rationale (TRM z feature)
-          state.zNotes = p.rationale.slice(0, 4000);
+          state.zNotes = p.rationale.slice(0, MAX_RATIONALE_LENGTH);
         }
 
         // Evaluate
@@ -719,7 +778,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         state.emaScore = state.step === 1 ? score : (state.emaAlpha * state.emaScore + (1 - state.emaAlpha) * score);
 
         // Improvement tracking
-        if (score > state.bestScore + 1e-6) {
+        if (score > state.bestScore + SCORE_IMPROVEMENT_EPSILON) {
           state.bestScore = score;
           state.noImproveStreak = 0;
         } else {
@@ -747,7 +806,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           ...diffHints(build.stderr, build.stdout),
           ...diffHints(test.stderr, test.stdout),
           ...diffHints(lint.stderr, lint.stdout)
-        ].slice(0, 12);
+        ].slice(0, MAX_HINT_LINES);
 
         const evalResult: EvalResult = {
           okBuild: build.ok,
@@ -757,7 +816,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           score,
           emaScore: state.emaScore,
           step: state.step,
-          feedback: [...new Set([...feedback, ...hintLines])].slice(0, 16),
+          feedback: [...new Set([...feedback, ...hintLines])].slice(0, MAX_FEEDBACK_ITEMS),
           shouldHalt: false,
           reasons: []
         };
@@ -822,8 +881,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         const state = sessions.get(p.sessionId);
         if (!state) return { content: [{ type: "text", text: `Unknown session: ${p.sessionId}` }] };
 
-        if (p.paths.length > 50) {
-          throw new Error(`Too many paths requested: ${p.paths.length} (max 50)`);
+        if (p.paths.length > MAX_FILE_READ_PATHS) {
+          throw new Error(`Too many paths requested: ${p.paths.length} (max ${MAX_FILE_READ_PATHS})`);
         }
 
         const files: Record<string, string> = {};
@@ -834,9 +893,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           try {
             const content = await fs.readFile(absPath, "utf8");
             files[relPath] = content;
-          } catch (err: any) {
+          } catch (err: unknown) {
             // If file doesn't exist, note it
-            files[relPath] = `[File not found: ${err.message}]`;
+            files[relPath] = `[File not found: ${err instanceof Error ? err.message : String(err)}]`;
           }
         }
 
@@ -854,8 +913,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       default:
         return { content: [{ type: "text", text: `Unhandled tool: ${req.params.name}` }] };
     }
-  } catch (err: any) {
-    return { content: [{ type: "text", text: `Error: ${String(err?.message ?? err)}` }] };
+  } catch (err: unknown) {
+    return { content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }] };
   }
 });
 
