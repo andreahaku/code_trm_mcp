@@ -1,0 +1,39 @@
+{
+  "name": "mcp-trm-server",
+  "version": "1.0.0",
+  "description": "TRM-inspired MCP server for recursive code refinement with LLM development tools",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "mcp-trm-server": "dist/server.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "dev": "tsc -p tsconfig.json --watch"
+  },
+  "keywords": [
+    "mcp",
+    "trm",
+    "code-refinement",
+    "llm",
+    "testing",
+    "recursive-improvement"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "execa": "^9.4.0",
+    "fs-extra": "^11.2.0",
+    "picocolors": "^1.0.0",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^22.5.0",
+    "@types/uuid": "^9.0.8",
+    "typescript": "^5.6.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
