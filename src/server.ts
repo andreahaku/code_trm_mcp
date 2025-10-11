@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { Tool, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { Tool, CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { v4 as uuidv4 } from "uuid";
 import fs from "fs-extra";
 import path from "path";
@@ -44,6 +44,42 @@ import pc from "picocolors";
  */
 
 type SessionId = string;
+
+// Tool argument types for type safety
+type StartSessionArgs = {
+  repoPath: string;
+  buildCmd?: string;
+  testCmd?: string;
+  lintCmd?: string;
+  benchCmd?: string;
+  timeoutSec?: number;
+  weights?: {
+    build?: number;
+    test?: number;
+    lint?: number;
+    perf?: number;
+  };
+  halt: {
+    maxSteps: number;
+    passThreshold: number;
+    patienceNoImprove: number;
+    minSteps?: number;
+  };
+  emaAlpha?: number;
+  zNotes?: string;
+};
+
+type SubmitCandidateArgs = {
+  sessionId: string;
+  candidate:
+    | { mode: "files"; files: { path: string; content: string }[] }
+    | { mode: "patch"; patch: string };
+  rationale?: string;
+};
+
+type SessionIdArgs = {
+  sessionId: string;
+};
 
 type SessionConfig = {
   repoPath: string;
@@ -101,10 +137,49 @@ const sessions = new Map<SessionId, SessionState>();
 
 function clamp01(x: number) { return Math.max(0, Math.min(1, x)); }
 
+/**
+ * Parse a command string into program and arguments, respecting quotes.
+ * Example: 'npm test --silent -- --reporter="json"' -> ['npm', 'test', '--silent', '--', '--reporter=json']
+ */
+function parseCommand(cmd: string): { bin: string; args: string[] } {
+  const tokens: string[] = [];
+  let current = "";
+  let inQuote = false;
+  let quoteChar = "";
+
+  for (let i = 0; i < cmd.length; i++) {
+    const char = cmd[i];
+
+    if ((char === '"' || char === "'") && (!inQuote || quoteChar === char)) {
+      if (inQuote && quoteChar === char) {
+        inQuote = false;
+        quoteChar = "";
+      } else if (!inQuote) {
+        inQuote = true;
+        quoteChar = char;
+      }
+    } else if (char === " " && !inQuote) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+    } else {
+      current += char;
+    }
+  }
+
+  if (current) tokens.push(current);
+
+  if (tokens.length === 0) throw new Error("Empty command");
+  const [bin, ...args] = tokens;
+  return { bin, args };
+}
+
 async function runCmd(cmd: string | undefined, cwd: string, timeoutSec: number): Promise<{ ok: boolean; stdout: string; stderr: string; exitCode: number | null }> {
   if (!cmd) return { ok: true, stdout: "", stderr: "", exitCode: 0 };
-  const [bin, ...args] = cmd.split(" ");
+
   try {
+    const { bin, args } = parseCommand(cmd);
     const { stdout, stderr, exitCode } = await execa(bin, args, { cwd, timeout: timeoutSec * 1000, shell: false });
     return { ok: (exitCode ?? 0) === 0, stdout, stderr, exitCode: exitCode ?? 0 };
   } catch (err: any) {
@@ -376,6 +451,12 @@ const tools: Tool[] = [
   }
 ];
 
+// Register tools list handler
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  return { tools };
+});
+
+// Register tool execution handler
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const tool = tools.find(t => t.name === req.params.name);
   if (!tool) {
@@ -385,7 +466,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   try {
     switch (req.params.name) {
       case "trm.startSession": {
-        const p = req.params.arguments as any;
+        const p = req.params.arguments as StartSessionArgs;
         const id: SessionId = uuidv4();
         const cfg: SessionConfig = {
           repoPath: p.repoPath,
@@ -426,7 +507,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
 
       case "trm.submitCandidate": {
-        const p = req.params.arguments as any;
+        const p = req.params.arguments as SubmitCandidateArgs;
         const state = sessions.get(p.sessionId);
         if (!state) {
           return { content: [{ type: "text", text: `Unknown session: ${p.sessionId}` }] };
@@ -461,10 +542,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         state.emaScore = state.step === 1 ? score : (state.emaAlpha * state.emaScore + (1 - state.emaAlpha) * score);
 
         // Improvement tracking
-        let improved = false;
         if (score > state.bestScore + 1e-6) {
           state.bestScore = score;
-          improved = true;
           state.noImproveStreak = 0;
         } else {
           state.noImproveStreak += 1;
@@ -530,7 +609,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
 
       case "trm.getState": {
-        const p = req.params.arguments as any;
+        const p = req.params.arguments as SessionIdArgs;
         const state = sessions.get(p.sessionId);
         if (!state) return { content: [{ type: "text", text: `Unknown session: ${p.sessionId}` }] };
 
@@ -552,7 +631,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
 
       case "trm.shouldHalt": {
-        const p = req.params.arguments as any;
+        const p = req.params.arguments as SessionIdArgs;
         const state = sessions.get(p.sessionId);
         if (!state) return { content: [{ type: "text", text: `Unknown session: ${p.sessionId}` }] };
         const last = state.history[state.history.length - 1];
@@ -562,7 +641,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
 
       case "trm.endSession": {
-        const p = req.params.arguments as any;
+        const p = req.params.arguments as SessionIdArgs;
         sessions.delete(p.sessionId);
         return { content: [{ type: "text", text: JSON.stringify({ ok: true }, null, 2) }] };
       }
