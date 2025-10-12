@@ -33,18 +33,21 @@ The codebase has been refactored from a monolithic 2489-line file into **14 focu
 
 ```
 src/
-├── server.ts (701 lines)        # MCP server orchestration
-├── types.ts (196 lines)         # All TypeScript type definitions
+├── server.ts (812 lines)        # MCP server orchestration
+├── types.ts (213 lines)         # All TypeScript type definitions
 ├── constants.ts (14 lines)      # Configuration constants
 ├── utils/                       # Core utilities
-│   ├── validation.ts (92)       # Path validation, argument validation, type guards
-│   ├── command.ts (78)          # Command parsing and execution with timeout
+│   ├── validation.ts (117)      # Path validation, argument validation, type guards
+│   ├── command.ts (86)          # Command parsing, execution, output sanitization
 │   ├── scoring.ts (107)         # TRM scoring, halting policy, error hints
-│   └── parser.ts (101)          # Test output and unified diff parsing
+│   ├── parser.ts (111)          # Test output and unified diff parsing
+│   ├── ts-error-parser.ts (142) # TypeScript error parsing with suggestions
+│   ├── mode-suggestion.ts (135) # Intelligent mode recommendations
+│   └── error-context.ts (168)   # Error correlation and context analysis
 ├── patcher/                     # Patch application system
 │   ├── custom-patcher.ts (163)  # Fuzzy-matching patch application
 │   ├── edit-operations.ts (179) # Semantic edit operations
-│   └── candidate.ts (361)       # Candidate application and validation
+│   └── candidate.ts (546)       # Candidate application, validation, preview
 ├── analyzer/                    # Code quality analysis
 │   ├── code-analyzer.ts (286)   # Static analysis with complexity metrics
 │   └── suggestions.ts (180)     # AI-powered improvement suggestions
