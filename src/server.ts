@@ -74,6 +74,7 @@ import { scoreFromSignals, shouldHalt, diffHints } from "./utils/scoring.js";
 
 // Import parser utilities
 import { parseTestOutput, parseUnifiedDiff } from "./utils/parser.js";
+import { parseTypeScriptErrors, formatTypeScriptError, groupRelatedErrors } from "./utils/ts-error-parser.js";
 
 // Import patcher modules
 import { customPatch } from "./patcher/custom-patcher.js";
@@ -626,6 +627,30 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         // Only report feedback for available commands
         if (state.commandStatus.build !== "unavailable" && !build.ok) {
           feedback.push("Build failed – fix compilation/type errors.");
+
+          // Parse TypeScript errors and add intelligent suggestions
+          const tsErrors = parseTypeScriptErrors(build.stderr + "\n" + build.stdout);
+          if (tsErrors.length > 0) {
+            // Group related errors to reduce noise
+            const grouped = groupRelatedErrors(tsErrors);
+
+            // Add up to 3 most relevant errors with suggestions
+            let errorCount = 0;
+            for (const [, errors] of grouped) {
+              if (errorCount >= 3) break;
+
+              const firstError = errors[0];
+              if (firstError.suggestion) {
+                feedback.push(formatTypeScriptError(firstError));
+                errorCount++;
+              }
+            }
+
+            // Add count summary if there are more errors
+            if (tsErrors.length > errorCount) {
+              feedback.push(`   (${tsErrors.length - errorCount} more TypeScript errors)`);
+            }
+          }
         }
         if (state.cfg.testCmd && state.commandStatus.test !== "unavailable") {
           if (!testParsed) {
