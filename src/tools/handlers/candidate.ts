@@ -8,25 +8,15 @@ import type {
   UndoLastCandidateArgs,
   EvalResult
 } from "../../types.js";
-import { parseUnifiedDiff } from "../../utils/parser.js";
-import { parseTestOutput } from "../../utils/parser.js";
-import { parseTypeScriptErrors, formatTypeScriptError, groupRelatedErrors } from "../../utils/ts-error-parser.js";
-import { correlateErrorsToChanges, generateErrorSuggestions } from "../../utils/error-context.js";
 import { suggestOptimalMode, suggestModeFromHistory } from "../../utils/mode-suggestion.js";
-import { scoreFromSignals, shouldHalt, diffHints } from "../../utils/scoring.js";
-import { runCmd } from "../../utils/command.js";
+import { shouldHalt } from "../../utils/scoring.js";
 import { applyCandidate, applyImprovedCandidate, validateCandidate } from "../../patcher/candidate.js";
-import {
-  MAX_RATIONALE_LENGTH,
-  SCORE_IMPROVEMENT_EPSILON,
-  MAX_HINT_LINES,
-  MAX_FEEDBACK_ITEMS,
-  DEFAULT_TIMEOUT_SEC,
-  DEFAULT_LINT_TIMEOUT_MIN_SEC,
-  LINT_TIMEOUT_DIVISOR,
-  FIRST_STEP
-} from "../../constants.js";
+import { MAX_RATIONALE_LENGTH, SCORE_IMPROVEMENT_EPSILON } from "../../constants.js";
 import { sessions } from "../../shared/sessions.js";
+import { runEvaluation, updateStateWithEvaluation } from "./lib/evaluation.js";
+import { generateFeedback, generateStaleContextWarnings } from "./lib/feedback.js";
+import { extractModifiedFiles, createFileSnapshot, updateModifiedFilesTracking } from "./lib/file-management.js";
+import { unknownSessionError, successResponse } from "./lib/response-utils.js";
 
 /**
  * Handler for trm.submitCandidate tool.
@@ -35,48 +25,19 @@ import { sessions } from "../../shared/sessions.js";
 export async function handleSubmitCandidate(args: SubmitCandidateArgs) {
   const state = sessions.get(args.sessionId);
   if (!state) {
-    return { content: [{ type: "text", text: `Unknown session: ${args.sessionId}` }] };
+    return unknownSessionError(args.sessionId);
   }
+
+  const candidate = args.candidate as any;
 
   // Extract files being modified
-  const candidate = args.candidate as any;
-  const filesBeingModified: string[] = [];
-  if (candidate.mode === "diff") {
-    filesBeingModified.push(...candidate.changes.map((c: any) => c.path));
-  } else if (candidate.mode === "patch") {
-    const parsed = parseUnifiedDiff(candidate.patch);
-    filesBeingModified.push(...parsed.map(d => d.file));
-  } else if (candidate.mode === "files") {
-    filesBeingModified.push(...candidate.files.map((f: any) => f.path));
-  } else if (candidate.mode === "modify") {
-    filesBeingModified.push(...candidate.changes.map((c: any) => c.file));
-  }
+  const filesBeingModified = extractModifiedFiles(candidate);
 
   // Check for stale context warnings
-  const staleContextWarnings: string[] = [];
-  for (const file of filesBeingModified) {
-    if (state.modifiedFiles.has(file)) {
-      // File was modified before - check if context is fresh
-      if (!state.fileSnapshots.has(file)) {
-        staleContextWarnings.push(
-          `⚠️  ${file} was modified in step ${state.step - 1} but context not refreshed. Use trm.getFileContent to avoid patch failures.`
-        );
-      }
-    }
-  }
+  const staleContextWarnings = generateStaleContextWarnings(state, filesBeingModified);
 
   // Phase 3: Save candidate snapshot BEFORE applying changes (for undo functionality)
-  const filesBeforeChange = new Map<string, string>();
-  for (const file of filesBeingModified) {
-    try {
-      const absPath = path.resolve(state.cfg.repoPath, file);
-      const content = await fs.readFile(absPath, "utf8");
-      filesBeforeChange.set(file, content);
-    } catch (err) {
-      // File might not exist yet (for create mode) - that's ok
-      filesBeforeChange.set(file, ""); // Empty string indicates file didn't exist
-    }
-  }
+  const filesBeforeChange = await createFileSnapshot(state.cfg.repoPath, filesBeingModified);
 
   // Apply candidate - handle both legacy and improved modes
   if (candidate.mode === "create" || candidate.mode === "modify") {
@@ -89,18 +50,8 @@ export async function handleSubmitCandidate(args: SubmitCandidateArgs) {
   }
 
   // Track modified files and automatically refresh their snapshots
-  for (const file of filesBeingModified) {
-    state.modifiedFiles.add(file);
-    // Automatically refresh context after modification
-    try {
-      const absPath = path.resolve(state.cfg.repoPath, file);
-      const content = await fs.readFile(absPath, "utf8");
-      state.fileSnapshots.set(file, content);
-    } catch (err) {
-      // File might not exist (e.g., deleted) - that's ok
-      state.fileSnapshots.delete(file);
-    }
-  }
+  await updateModifiedFilesTracking(state, filesBeingModified);
+
   if (typeof args.rationale === "string" && args.rationale.trim().length) {
     // Keep only the latest rationale (TRM z feature)
     state.zNotes = args.rationale.slice(0, MAX_RATIONALE_LENGTH);
@@ -108,136 +59,35 @@ export async function handleSubmitCandidate(args: SubmitCandidateArgs) {
 
   // Evaluate (skip unavailable commands)
   state.step += 1;
-  const tSec = state.cfg.timeoutSec ?? DEFAULT_TIMEOUT_SEC;
-  // Lint timeout is half of main timeout, with a minimum threshold
-  const lintTimeoutSec = Math.max(DEFAULT_LINT_TIMEOUT_MIN_SEC, tSec / LINT_TIMEOUT_DIVISOR);
+  const evalResults = await runEvaluation(state);
 
-  // Only run available commands
-  const build = state.commandStatus.build !== "unavailable"
-    ? await runCmd(state.cfg.buildCmd, state.cfg.repoPath, tSec)
-    : { ok: true, stdout: "", stderr: "", exitCode: 0 }; // Skip if unavailable
-
-  const test = state.commandStatus.test !== "unavailable"
-    ? await runCmd(state.cfg.testCmd, state.cfg.repoPath, tSec)
-    : { ok: true, stdout: "", stderr: "", exitCode: 0 };
-
-  const lint = state.commandStatus.lint !== "unavailable"
-    ? await runCmd(state.cfg.lintCmd, state.cfg.repoPath, lintTimeoutSec)
-    : { ok: true, stdout: "", stderr: "", exitCode: 0 };
-
-  const bench = state.commandStatus.bench !== "unavailable"
-    ? await runCmd(state.cfg.benchCmd, state.cfg.repoPath, tSec)
-    : { ok: true, stdout: "", stderr: "", exitCode: 0 };
-
-  const testParsed = state.cfg.testCmd && state.commandStatus.test !== "unavailable"
-    ? parseTestOutput(test.stdout || test.stderr || "")
-    : null;
-
-  const score = scoreFromSignals(state, {
-    buildOk: build.ok,
-    lintOk: lint.ok,
-    tests: testParsed ? { passed: testParsed.passed, total: testParsed.total } : undefined,
-    perf: state.cfg.benchCmd && state.commandStatus.bench !== "unavailable"
-      ? { value: parseFloat((bench.stdout || bench.stderr).match(/([\d.]+)$/)?.[1] || "NaN") }
-      : undefined
-  });
-
-  // EMA
-  state.emaScore = state.step === FIRST_STEP ? score
-    : (state.emaAlpha * state.emaScore + (1 - state.emaAlpha) * score);
-
-  // Improvement tracking
-  if (score > state.bestScore + SCORE_IMPROVEMENT_EPSILON) {
-    state.bestScore = score;
-    state.noImproveStreak = 0;
-  } else {
-    state.noImproveStreak += 1;
-  }
+  // Update state with evaluation results
+  updateStateWithEvaluation(state, evalResults.score);
 
   // Track this iteration's context for error correlation
   state.iterationContexts.push({
     step: state.step,
     filesModified: [...filesBeingModified],
     mode: candidate.mode,
-    success: build.ok && (!testParsed || testParsed.passed === testParsed.total) && lint.ok
+    success: evalResults.build.ok &&
+      (!evalResults.testParsed || evalResults.testParsed.passed === evalResults.testParsed.total) &&
+      evalResults.lint.ok
   });
 
-  const feedback: string[] = [];
-  // Add stale context warnings first (high priority)
-  feedback.push(...staleContextWarnings);
-
-  // Use error context correlation for failures
-  if (state.commandStatus.build !== "unavailable" && !build.ok) {
-    feedback.push("Build failed – fix compilation/type errors.");
-
-    // Correlate errors to recent changes
-    const errorContext = correlateErrorsToChanges(
-      build.stderr + "\n" + build.stdout,
-      state.iterationContexts.slice(-5), // Last 5 iterations
-      state.step
-    );
-
-    // Add correlation analysis
-    feedback.push(...errorContext.analysis);
-
-    // Add actionable suggestions
-    const suggestions = generateErrorSuggestions("build", errorContext.likelyCulprit);
-    feedback.push(...suggestions);
-
-    // Parse TypeScript errors and add intelligent suggestions
-    const tsErrors = parseTypeScriptErrors(build.stderr + "\n" + build.stdout);
-    if (tsErrors.length > 0) {
-      // Group related errors to reduce noise
-      const grouped = groupRelatedErrors(tsErrors);
-
-      // Add up to 3 most relevant errors with suggestions
-      let errorCount = 0;
-      for (const [, errors] of grouped) {
-        if (errorCount >= 3) break;
-
-        const firstError = errors[0];
-        if (firstError.suggestion) {
-          feedback.push(formatTypeScriptError(firstError));
-          errorCount++;
-        }
-      }
-
-      // Add count summary if there are more errors
-      if (tsErrors.length > errorCount) {
-        feedback.push(`   (${tsErrors.length - errorCount} more TypeScript errors)`);
-      }
-    }
-  }
-  if (state.cfg.testCmd && state.commandStatus.test !== "unavailable") {
-    if (!testParsed) {
-      feedback.push("Tests output not parsed – prefer JSON reporter or include summary lines.");
-    } else {
-      feedback.push(`Tests: ${testParsed.passed}/${testParsed.total} passed.`);
-      if (testParsed.failed > 0) feedback.push(`There are ${testParsed.failed} failing tests.`);
-    }
-  }
-  if (state.cfg.lintCmd && state.commandStatus.lint !== "unavailable" && !lint.ok) {
-    feedback.push("Lint failed – fix style/static-analysis issues.");
-  }
-  if (state.cfg.benchCmd && state.commandStatus.bench !== "unavailable" && bench.ok) {
-    feedback.push("Benchmark executed – try improving critical hot paths while keeping correctness.");
-  }
-
-  const hintLines = [
-    ...(state.commandStatus.build !== "unavailable" ? diffHints(build.stderr, build.stdout) : []),
-    ...(state.commandStatus.test !== "unavailable" ? diffHints(test.stderr, test.stdout) : []),
-    ...(state.commandStatus.lint !== "unavailable" ? diffHints(lint.stderr, lint.stdout) : [])
-  ].slice(0, MAX_HINT_LINES);
+  // Generate feedback from evaluation results
+  const feedback = generateFeedback(state, evalResults, staleContextWarnings);
 
   const evalResult: EvalResult = {
-    okBuild: build.ok,
-    okLint: lint.ok,
-    tests: testParsed ? { ...testParsed, raw: "" } : undefined,
-    perf: state.cfg.benchCmd && isFinite(Number(bench.stdout)) ? { value: Number(bench.stdout) } : undefined,
-    score,
+    okBuild: evalResults.build.ok,
+    okLint: evalResults.lint.ok,
+    tests: evalResults.testParsed ? { ...evalResults.testParsed, raw: "" } : undefined,
+    perf: state.cfg.benchCmd && isFinite(Number(evalResults.bench.stdout))
+      ? { value: Number(evalResults.bench.stdout) }
+      : undefined,
+    score: evalResults.score,
     emaScore: state.emaScore,
     step: state.step,
-    feedback: [...new Set([...feedback, ...hintLines])].slice(0, MAX_FEEDBACK_ITEMS),
+    feedback,
     shouldHalt: false,
     reasons: []
   };
@@ -282,7 +132,7 @@ export async function handleSubmitCandidate(args: SubmitCandidateArgs) {
     evalResult.modeSuggestion = modeSuggestion;
   }
 
-  const compact = {
+  return successResponse({
     step: evalResult.step,
     score: evalResult.score,
     emaScore: evalResult.emaScore,
@@ -295,9 +145,7 @@ export async function handleSubmitCandidate(args: SubmitCandidateArgs) {
     reasons: evalResult.reasons,
     feedback: evalResult.feedback,
     modeSuggestion: evalResult.modeSuggestion
-  };
-
-  return { content: [{ type: "text", text: JSON.stringify(compact, null, 2) }] };
+  });
 }
 
 /**
@@ -307,11 +155,11 @@ export async function handleSubmitCandidate(args: SubmitCandidateArgs) {
 export async function handleValidateCandidate(args: { sessionId: string; candidate: CreateSubmission | ModifySubmission }) {
   const state = sessions.get(args.sessionId);
   if (!state) {
-    return { content: [{ type: "text", text: `Unknown session: ${args.sessionId}` }] };
+    return unknownSessionError(args.sessionId);
   }
 
   const validation = await validateCandidate(state.cfg.repoPath, args.candidate);
-  return { content: [{ type: "text", text: JSON.stringify(validation, null, 2) }] };
+  return successResponse(validation);
 }
 
 /**
@@ -321,12 +169,12 @@ export async function handleValidateCandidate(args: { sessionId: string; candida
 export async function handleUndoLastCandidate(args: UndoLastCandidateArgs) {
   const state = sessions.get(args.sessionId);
   if (!state) {
-    return { content: [{ type: "text", text: `Unknown session: ${args.sessionId}` }] };
+    return unknownSessionError(args.sessionId);
   }
 
   // Check if there are snapshots to undo
   if (state.candidateSnapshots.length === 0) {
-    return { content: [{ type: "text", text: JSON.stringify({ error: "No candidate to undo" }, null, 2) }] };
+    return successResponse({ error: "No candidate to undo" });
   }
 
   // Get the last snapshot
@@ -344,9 +192,9 @@ export async function handleUndoLastCandidate(args: UndoLastCandidateArgs) {
         await fs.writeFile(absPath, contentBefore, "utf8");
       }
     } catch (err) {
-      return { content: [{ type: "text", text: JSON.stringify({
+      return successResponse({
         error: `Failed to restore file ${file}: ${err instanceof Error ? err.message : String(err)}`
-      }, null, 2) }] };
+      });
     }
   }
 
@@ -388,13 +236,11 @@ export async function handleUndoLastCandidate(args: UndoLastCandidateArgs) {
     }
   }
 
-  const response = {
+  return successResponse({
     message: `Undone candidate from step ${lastSnapshot.step}`,
     currentStep: state.step,
     score: state.history.length > 0 ? state.history[state.history.length - 1].score : 0,
     emaScore: state.emaScore,
     filesRestored: Array.from(lastSnapshot.filesBeforeChange.keys())
-  };
-
-  return { content: [{ type: "text", text: JSON.stringify(response, null, 2) }] };
+  });
 }

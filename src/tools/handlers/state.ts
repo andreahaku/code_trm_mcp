@@ -2,6 +2,7 @@ import type { SessionIdArgs } from "../../types.js";
 import { shouldHalt } from "../../utils/scoring.js";
 import { generateSuggestions } from "../../analyzer/suggestions.js";
 import { sessions } from "../../shared/sessions.js";
+import { unknownSessionError, successResponse } from "./lib/response-utils.js";
 
 /**
  * Handler for trm.getState tool.
@@ -10,24 +11,19 @@ import { sessions } from "../../shared/sessions.js";
 export async function handleGetState(args: SessionIdArgs) {
   const state = sessions.get(args.sessionId);
   if (!state) {
-    return { content: [{ type: "text", text: `Unknown session: ${args.sessionId}` }] };
+    return unknownSessionError(args.sessionId);
   }
 
   const last = state.history[state.history.length - 1];
-  return {
-    content: [{
-      type: "text",
-      text: JSON.stringify({
-        sessionId: state.id,
-        step: state.step,
-        emaScore: state.emaScore,
-        bestScore: state.bestScore,
-        noImproveStreak: state.noImproveStreak,
-        last,
-        zNotes: state.zNotes
-      }, null, 2)
-    }]
-  };
+  return successResponse({
+    sessionId: state.id,
+    step: state.step,
+    emaScore: state.emaScore,
+    bestScore: state.bestScore,
+    noImproveStreak: state.noImproveStreak,
+    last,
+    zNotes: state.zNotes
+  });
 }
 
 /**
@@ -37,16 +33,16 @@ export async function handleGetState(args: SessionIdArgs) {
 export async function handleShouldHalt(args: SessionIdArgs) {
   const state = sessions.get(args.sessionId);
   if (!state) {
-    return { content: [{ type: "text", text: `Unknown session: ${args.sessionId}` }] };
+    return unknownSessionError(args.sessionId);
   }
 
   const last = state.history[state.history.length - 1];
   if (!last) {
-    return { content: [{ type: "text", text: JSON.stringify({ shouldHalt: false, reasons: ["no evaluations yet"] }, null, 2) }] };
+    return successResponse({ shouldHalt: false, reasons: ["no evaluations yet"] });
   }
 
   const decision = shouldHalt(state, last);
-  return { content: [{ type: "text", text: JSON.stringify({ shouldHalt: decision.halt, reasons: decision.reasons }, null, 2) }] };
+  return successResponse({ shouldHalt: decision.halt, reasons: decision.reasons });
 }
 
 /**
@@ -56,14 +52,14 @@ export async function handleShouldHalt(args: SessionIdArgs) {
 export async function handleGetSuggestions(args: SessionIdArgs) {
   const state = sessions.get(args.sessionId);
   if (!state) {
-    return { content: [{ type: "text", text: `Unknown session: ${args.sessionId}` }] };
+    return unknownSessionError(args.sessionId);
   }
 
   const last = state.history[state.history.length - 1];
   if (!last) {
-    return { content: [{ type: "text", text: JSON.stringify({ suggestions: [], message: "No evaluations yet" }, null, 2) }] };
+    return successResponse({ suggestions: [], message: "No evaluations yet" });
   }
 
   const suggestions = await generateSuggestions(state, last);
-  return { content: [{ type: "text", text: JSON.stringify({ suggestions }, null, 2) }] };
+  return successResponse({ suggestions });
 }
