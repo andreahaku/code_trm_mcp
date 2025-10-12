@@ -6,6 +6,7 @@ import fs from "fs-extra";
 import path from "path";
 import { v4 as uuidv4 } from "uuid";
 import type { SessionState, Checkpoint } from "../types.js";
+import { validateSafePath } from "../utils/validation.js";
 
 /**
  * Save current state as a checkpoint
@@ -16,8 +17,24 @@ export async function saveCheckpoint(
 ): Promise<string> {
   const checkpointId = uuidv4();
 
-  // Capture current files in repository
+  // Capture current files in repository (only in snapshot mode)
   const filesSnapshot = new Map<string, string>();
+  if (state.mode === "snapshot") {
+    try {
+      // Read all tracked files that were modified in this session
+      for (const filePath of state.modifiedFiles) {
+        validateSafePath(state.cfg.repoPath, filePath);
+        const absPath = path.resolve(state.cfg.repoPath, filePath);
+        if (await fs.pathExists(absPath)) {
+          const content = await fs.readFile(absPath, "utf8");
+          filesSnapshot.set(filePath, content);
+        }
+      }
+    } catch (err) {
+      console.warn(`Warning: Failed to capture file snapshots: ${err}`);
+      // Continue anyway - checkpoint without file snapshots
+    }
+  }
   // For simplicity, we track changes via git or manual snapshot
   // In a production system, you might use git stash or tags
 
@@ -54,10 +71,18 @@ export async function restoreCheckpoint(
 
   // In snapshot mode, restore files
   if (state.mode === "snapshot" && checkpoint.filesSnapshot.size > 0) {
-    for (const [relPath, content] of checkpoint.filesSnapshot) {
-      const absPath = path.resolve(state.cfg.repoPath, relPath);
-      await fs.ensureDir(path.dirname(absPath));
-      await fs.writeFile(absPath, content, "utf8");
+    try {
+      for (const [relPath, content] of checkpoint.filesSnapshot) {
+        validateSafePath(state.cfg.repoPath, relPath);
+        const absPath = path.resolve(state.cfg.repoPath, relPath);
+        await fs.ensureDir(path.dirname(absPath));
+        await fs.writeFile(absPath, content, "utf8");
+      }
+    } catch (err) {
+      return { 
+        success: false, 
+        error: `Failed to restore files: ${err instanceof Error ? err.message : String(err)}` 
+      };
     }
   }
 
