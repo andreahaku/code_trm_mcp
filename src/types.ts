@@ -38,11 +38,26 @@ export type SubmitCandidateArgs = {
   rationale?: string;
 };
 
+export type FileMetadata = {
+  lineCount: number;
+  sizeBytes: number;
+  lastModified: string; // ISO timestamp
+};
+
 export type GetFileContentArgs = {
   sessionId: string;
   paths: string[];
   offset?: number;  // Line number to start from (1-based)
   limit?: number;   // Maximum number of lines to return
+};
+
+export type FileWithMetadata = {
+  content: string;
+  metadata: FileMetadata;
+};
+
+export type GetFileContentResponse = {
+  files: Record<string, FileWithMetadata>;
 };
 
 export type SessionIdArgs = {
@@ -180,7 +195,19 @@ export type EnhancedError = {
     got?: string;
     suggestion?: string;
     context?: string;
+    requestedLine?: number;         // For line validation errors
+    actualLineCount?: number;       // For line validation errors
+    [key: string]: any;             // Allow additional properties for specific error types
   };
+};
+
+export type FilePreview = {
+  file: string;
+  beforeLines: string[];  // Lines with numbers, e.g., "10: const foo = 'bar';"
+  afterLines: string[];   // Lines with numbers showing the change
+  linesAdded: number;
+  linesRemoved: number;
+  changeType: "insertion" | "deletion" | "modification" | "replacement";
 };
 
 export type ValidationResult = {
@@ -192,6 +219,7 @@ export type ValidationResult = {
     linesAdded: number;
     linesRemoved: number;
     linesModified: number;
+    filesPreviews?: FilePreview[];  // Detailed per-file previews
   };
 };
 

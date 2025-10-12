@@ -750,19 +750,39 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           throw new Error(`Too many paths requested: ${p.paths.length} (max ${MAX_FILE_READ_PATHS})`);
         }
 
-        const files: Record<string, string> = {};
+        const files: Record<string, { content: string; metadata: { lineCount: number; sizeBytes: number; lastModified: string } }> = {};
         for (const relPath of p.paths) {
           validateSafePath(state.cfg.repoPath, relPath);
           const absPath = path.resolve(state.cfg.repoPath, relPath);
 
           try {
             const content = await fs.readFile(absPath, "utf8");
-            files[relPath] = content;
+            const stats = await fs.stat(absPath);
+
+            // Calculate line count
+            const lineCount = content.split('\n').length;
+
+            files[relPath] = {
+              content,
+              metadata: {
+                lineCount,
+                sizeBytes: stats.size,
+                lastModified: stats.mtime.toISOString()
+              }
+            };
+
             // Cache the snapshot for context staleness detection
             state.fileSnapshots.set(relPath, content);
           } catch (err: unknown) {
-            // If file doesn't exist, note it
-            files[relPath] = `[File not found: ${err instanceof Error ? err.message : String(err)}]`;
+            // If file doesn't exist, note it with error metadata
+            files[relPath] = {
+              content: `[File not found: ${err instanceof Error ? err.message : String(err)}]`,
+              metadata: {
+                lineCount: 0,
+                sizeBytes: 0,
+                lastModified: new Date().toISOString()
+              }
+            };
           }
         }
 

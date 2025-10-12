@@ -9,7 +9,8 @@ import type {
   EnhancedError,
   ValidationResult,
   CreateSubmission,
-  ModifySubmission
+  ModifySubmission,
+  EditOperation
 } from "../types.js";
 import { validateSafePath } from "../utils/validation.js";
 import { parseUnifiedDiff } from "../utils/parser.js";
@@ -19,6 +20,160 @@ import {
   MAX_FILE_SIZE,
   MAX_CANDIDATE_FILES
 } from "../constants.js";
+
+/**
+ * Validate edit operations before applying them.
+ * Checks for line number errors and potential duplicate functions.
+ */
+async function validateEditOperations(
+  repoPath: string,
+  filePath: string,
+  edits: EditOperation[]
+): Promise<EnhancedError[]> {
+  const errors: EnhancedError[] = [];
+
+  try {
+    const absPath = path.resolve(repoPath, filePath);
+    const content = await fs.readFile(absPath, "utf8");
+    const lines = content.split(/\r?\n/);
+    const lineCount = lines.length;
+
+    for (const edit of edits) {
+      // Validate line numbers
+      if ('line' in edit) {
+        const line = edit.line;
+        if (line < 1 || line > lineCount) {
+          errors.push({
+            error: `Line ${line} out of range`,
+            code: "INVALID_LINE",
+            details: {
+              failedAt: filePath,
+              requestedLine: line,
+              actualLineCount: lineCount,
+              reason: `Line number must be between 1 and ${lineCount}`,
+              suggestion: `Use a line number between 1 and ${lineCount}. Get file metadata via getFileContent to see line count.`
+            }
+          });
+          continue;
+        }
+      }
+
+      // Check for range errors
+      if ('startLine' in edit && 'endLine' in edit) {
+        if (edit.startLine < 1 || edit.endLine > lineCount || edit.startLine > edit.endLine) {
+          errors.push({
+            error: "Invalid line range",
+            code: "INVALID_RANGE",
+            details: {
+              failedAt: filePath,
+              reason: `Range ${edit.startLine}-${edit.endLine} is invalid (file has ${lineCount} lines)`,
+              suggestion: "Check start and end line numbers"
+            }
+          });
+          continue;
+        }
+      }
+
+      // Check for potential duplicate functions
+      if ((edit.type === 'insertAfter' || edit.type === 'insertBefore') && 'content' in edit) {
+        const insertContent = edit.content.trim();
+
+        // Look for function/class/export declarations
+        const declarationMatch = insertContent.match(/export\s+(function|class|const|let|var|type|interface)\s+(\w+)/);
+
+        if (declarationMatch) {
+          const [, declType, name] = declarationMatch;
+          const contextStart = Math.max(0, edit.line - 10);
+          const contextEnd = Math.min(lineCount, edit.line + 10);
+          const nearbyLines = lines.slice(contextStart, contextEnd).join('\n');
+
+          // Check if this name already exists nearby
+          const namePattern = new RegExp(`\\b${name}\\b`);
+          if (namePattern.test(nearbyLines)) {
+            errors.push({
+              error: `Potential duplicate ${declType}`,
+              code: "DUPLICATE_DECLARATION",
+              details: {
+                failedAt: `${filePath}:${edit.line}`,
+                reason: `${declType} '${name}' may already exist near line ${edit.line}`,
+                suggestion: `Check if '${name}' already exists. Use Edit tool to modify existing ${declType} instead of inserting a new one.`,
+                context: `Found in context: lines ${contextStart + 1}-${contextEnd}`
+              }
+            });
+          }
+        }
+      }
+    }
+  } catch (err: unknown) {
+    errors.push({
+      error: "Validation failed",
+      code: "VALIDATION_ERROR",
+      details: {
+        failedAt: filePath,
+        reason: err instanceof Error ? err.message : String(err),
+        suggestion: "Check file exists and is readable"
+      }
+    });
+  }
+
+  return errors;
+}
+
+/**
+ * Generate a detailed preview of what changes will look like.
+ */
+async function generateEditPreview(
+  repoPath: string,
+  filePath: string,
+  edits: EditOperation[]
+): Promise<{ beforeLines: string[]; afterLines: string[]; changeType: string }> {
+  const absPath = path.resolve(repoPath, filePath);
+  const content = await fs.readFile(absPath, "utf8");
+  const lines = content.split(/\r?\n/);
+
+  // Find the affected range
+  let minLine = Infinity;
+  let maxLine = 0;
+
+  for (const edit of edits) {
+    if ('line' in edit) {
+      minLine = Math.min(minLine, edit.line);
+      maxLine = Math.max(maxLine, edit.line);
+    }
+    if ('startLine' in edit && 'endLine' in edit) {
+      minLine = Math.min(minLine, edit.startLine);
+      maxLine = Math.max(maxLine, edit.endLine);
+    }
+  }
+
+  // Add context (3 lines before and after)
+  const contextBefore = 3;
+  const contextAfter = 3;
+  const startLine = Math.max(1, minLine - contextBefore);
+  const endLine = Math.min(lines.length, maxLine + contextAfter);
+
+  // Generate before lines
+  const beforeLines: string[] = [];
+  for (let i = startLine; i <= endLine; i++) {
+    beforeLines.push(`${i}: ${lines[i - 1]}`);
+  }
+
+  // Determine change type
+  let changeType = "modification";
+  if (edits.some(e => e.type === "insertAfter" || e.type === "insertBefore")) {
+    changeType = "insertion";
+  } else if (edits.some(e => e.type === "deleteLine" || e.type === "deleteRange")) {
+    changeType = "deletion";
+  } else if (edits.some(e => e.type === "replace" || e.type === "replaceRange")) {
+    changeType = "replacement";
+  }
+
+  // For after lines, we'd need to simulate the edits, which is complex
+  // For now, just indicate where changes will occur
+  const afterLines = [`Changes will be applied near lines ${minLine}-${maxLine}`, ...beforeLines];
+
+  return { beforeLines, afterLines, changeType };
+}
 
 /**
  * Apply candidate changes to the repository using custom patcher (for diffs) or direct writes (for files).
@@ -207,6 +362,15 @@ export async function applyImprovedCandidate(
         });
         continue;
       }
+
+      // Pre-apply validation: check line numbers and detect duplicates BEFORE applying
+      const validationErrors = await validateEditOperations(repoPath, change.file, change.edits);
+      if (validationErrors.length > 0) {
+        errors.push(...validationErrors);
+        continue; // Skip applying if validation fails
+      }
+
+      // Apply edits only if validation passed
       const result = await applyEditOperations(repoPath, change.file, change.edits);
       if (!result.success && result.error) {
         errors.push(result.error);
@@ -242,6 +406,7 @@ export async function validateCandidate(
   let linesAdded = 0;
   let linesRemoved = 0;
   let linesModified = 0;
+  const filesPreviews: Array<{ file: string; beforeLines: string[]; afterLines: string[]; linesAdded: number; linesRemoved: number; changeType: "insertion" | "deletion" | "modification" | "replacement" }> = [];
 
   try {
     if (candidate.mode === "create") {
@@ -356,6 +521,21 @@ export async function validateCandidate(
           }
         }
 
+        // Generate preview for this file's changes
+        try {
+          const preview = await generateEditPreview(repoPath, change.file, change.edits);
+          filesPreviews.push({
+            file: change.file,
+            beforeLines: preview.beforeLines,
+            afterLines: preview.afterLines,
+            linesAdded: 0, // Would need edit simulation for exact count
+            linesRemoved: 0,
+            changeType: preview.changeType as "insertion" | "deletion" | "modification" | "replacement"
+          });
+        } catch (err) {
+          // Preview generation is best-effort, don't fail validation
+        }
+
         filesAffected.push(change.file);
         linesModified += change.edits.length;
       }
@@ -415,7 +595,8 @@ export async function validateCandidate(
       filesAffected: [...new Set(filesAffected)],
       linesAdded,
       linesRemoved,
-      linesModified
+      linesModified,
+      filesPreviews: filesPreviews.length > 0 ? filesPreviews : undefined
     }
   };
 }
