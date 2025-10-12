@@ -15,9 +15,10 @@ This server implements a recursive improvement cycle where:
 - **Weighted scoring**: Configurable weights for different evaluation signals
 - **EMA tracking**: Smooth score tracking across iterations
 - **Intelligent halting**: Stop when tests pass + score threshold, no improvement, or max steps
-- **Flexible candidate submission**: Support for both file-based and unified diff patches
+- **Flexible candidate submission**: Support for multiple modes (files, patch, diff, modify, create)
 - **Safe execution**: Commands run in isolated directories with configurable timeouts
-- **Actionable feedback**: Compact, LLM-friendly error messages and hints
+- **Actionable feedback**: Compact, LLM-friendly error messages with TypeScript parsing and correlation
+- **Advanced features**: Quick undo, incremental file reading, AI-powered fix suggestions
 
 ## Installation
 
@@ -44,542 +45,193 @@ npm run build
 
 ### Codex CLI
 
-Point to the server binary via stdio:
 ```bash
-# Configure in your MCP client config
 {
   "command": "node",
   "args": ["/absolute/path/to/code_trm_mcp/dist/server.js"]
 }
 ```
 
-## Available Tools
+## Available Tools (15 Total)
 
-The server exposes **15 MCP tools** for iterative code refinement:
+### Core Tools
 
-### `trm.startSession`
+#### `trm.startSession`
 
-Initialize a TRM session on a local repository with evaluation commands and halting policy.
+Initialize a TRM session on a local repository.
 
 **Parameters:**
-- `repoPath` (required): Absolute path to the project repository
-- `buildCmd`: Build command (e.g., `"tsc -p . --noEmit"`)
-- `testCmd`: Test command (e.g., `"npm test --silent -- --reporter=json"`)
-- `lintCmd`: Lint command (e.g., `"npm run lint"`)
-- `benchCmd`: Benchmark command (optional, should output a number)
+- `repoPath` (required): Absolute path to project
+- `buildCmd`, `testCmd`, `lintCmd`, `benchCmd`: Evaluation commands
 - `timeoutSec`: Timeout per command (default: 120)
-- `weights`: Score weights object:
-  - `build`: Weight for build success (default: 0.3)
-  - `test`: Weight for test pass rate (default: 0.5)
-  - `lint`: Weight for lint success (default: 0.1)
-  - `perf`: Weight for performance (default: 0.1)
-- `halt`: Halting policy:
-  - `maxSteps`: Maximum iteration steps (required)
-  - `passThreshold`: Score threshold to accept (required, 0-1)
-  - `patienceNoImprove`: Steps without improvement before halting (required)
-  - `minSteps`: Minimum steps before allowing halt (default: 1)
+- `weights`: Score weights (build: 0.3, test: 0.5, lint: 0.1, perf: 0.1)
+- `halt`: Halting policy (maxSteps, passThreshold, patienceNoImprove, minSteps)
 - `emaAlpha`: EMA smoothing factor (default: 0.9)
-- `zNotes`: Optional initial reasoning notes/hints
-- `preflight`: Run initial validation checks (default: false)
+- `zNotes`: Optional initial reasoning notes
+- `preflight`: Run validation checks (default: false)
 
-**Returns:**
-- `sessionId`: UUID for the session
-- `message`: Confirmation message
-- `preflight` (if enabled): Validation results including repo status, command availability, and initial build check
+**Returns:** `sessionId`, `message`, optional `preflight` results
 
-**Preflight Example:**
-```json
-{
-  "sessionId": "abc-123",
-  "message": "Session started",
-  "preflight": {
-    "repoStatus": {
-      "gitRepo": true,
-      "uncommittedChanges": false
-    },
-    "commands": {
-      "build": { "status": "available", "estimatedTime": "~3s" },
-      "test": { "status": "available", "estimatedTime": "~5s" }
-    },
-    "initialBuild": {
-      "success": true,
-      "warnings": []
-    }
-  }
-}
-```
+#### `trm.submitCandidate`
 
-### `trm.submitCandidate`
-
-Apply candidate changes, run evaluation, update EMA & state, return feedback + shouldHalt decision.
+Apply candidate changes, run evaluation, return feedback.
 
 **Parameters:**
-- `sessionId` (required): Session UUID from startSession
-- `candidate` (required): One of:
-  - **Files mode**:
-    ```json
-    {
-      "mode": "files",
-      "files": [
-        {
-          "path": "relative/path/to/file.ts",
-          "content": "complete file content"
-        }
-      ]
-    }
-    ```
-  - **Patch mode**:
-    ```json
-    {
-      "mode": "patch",
-      "patch": "unified diff format patch"
-    }
-    ```
-- `rationale`: LLM reasoning notes (why these changes, expected effects, hypotheses)
+- `sessionId` (required)
+- `candidate` (required): One of these modes:
+  - **files**: Complete file contents
+  - **patch**: Unified diff format
+  - **diff**: Per-file diffs
+  - **modify**: Semantic edit operations
+  - **create**: New files only
+- `rationale`: LLM reasoning notes
 
-**Returns:**
-```json
-{
-  "step": 1,
-  "score": 0.85,
-  "emaScore": 0.85,
-  "bestScore": 0.85,
-  "noImproveStreak": 0,
-  "tests": {
-    "passed": 42,
-    "failed": 2,
-    "total": 44
-  },
-  "okBuild": true,
-  "okLint": true,
-  "shouldHalt": false,
-  "reasons": [],
-  "feedback": [
-    "Tests: 42/44 passed.",
-    "There are 2 failing tests.",
-    "src/parser.ts:123:45 - error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'.",
-    "🔍 Error likely caused by changes in iteration 1:",
-    "   - src/parser.ts",
-    "📍 Last successful build: iteration 0 (score from history)"
-  ],
-  "modeSuggestion": {
-    "recommended": "modify",
-    "reason": "You're making small targeted changes. 'modify' mode provides better precision and clearer error messages than 'diff' mode.",
-    "confidence": "high",
-    "alternatives": {
-      "diff": "Continue using for changes spanning multiple sections",
-      "patch": "Use when coordinating changes across multiple files"
-    }
-  }
-}
-```
+**Returns:** `step`, `score`, `emaScore`, `bestScore`, `tests`, `okBuild`, `okLint`, `shouldHalt`, `reasons`, `feedback`, `modeSuggestion`
 
 **Key Features:**
-- **Error Correlation**: Feedback includes analysis showing which iteration likely caused errors (see `🔍` lines)
-- **Mode Suggestions**: Get intelligent recommendations for optimal submission modes based on your changes
+- Error correlation showing which iteration caused errors
+- Intelligent mode suggestions based on change patterns
+- TypeScript error parsing with actionable suggestions
 
-### `trm.getState`
+#### `trm.getFileContent`
 
-Return current TRM state snapshot (scores, EMA, history summary).
-
-**Parameters:**
-- `sessionId` (required): Session UUID
-
-**Returns:**
-- `sessionId`: Session UUID
-- `step`: Current step number
-- `emaScore`: Current EMA score
-- `bestScore`: Best score achieved so far
-- `noImproveStreak`: Consecutive steps without improvement
-- `last`: Last evaluation result
-- `zNotes`: Current reasoning notes
-
-### `trm.shouldHalt`
-
-Return halting decision based on latest evaluation.
+Read current file state with metadata.
 
 **Parameters:**
-- `sessionId` (required): Session UUID
+- `sessionId`, `paths` (required)
+- `offset`, `limit`: Optional line range
 
-**Returns:**
-- `shouldHalt`: Boolean indicating if iteration should stop
-- `reasons`: Array of reason strings
+**Returns:** File contents with metadata (lineCount, sizeBytes, lastModified)
 
-### `trm.endSession`
+#### `trm.getState`
 
-End and remove a TRM session.
+Return current session state snapshot.
 
-**Parameters:**
-- `sessionId` (required): Session UUID
+**Returns:** `sessionId`, `step`, `emaScore`, `bestScore`, `noImproveStreak`, `last`, `zNotes`
 
-**Returns:**
-- `ok`: Boolean confirmation
+#### `trm.shouldHalt`
 
-### `trm.getFileContent`
+Check halting decision.
 
-Read current file state with metadata for generating accurate diffs.
+**Returns:** `shouldHalt`, `reasons`
 
-**Parameters:**
-- `sessionId` (required): Session UUID
-- `paths` (required): Array of relative file paths to read
-- `offset`: Line number to start from (1-based, optional)
-- `limit`: Maximum number of lines to return (optional)
+#### `trm.endSession`
 
-**Returns:**
-```json
-{
-  "files": {
-    "src/parser.ts": {
-      "content": "export function parseTestOutput(raw: string) {\n  // ...\n}",
-      "metadata": {
-        "lineCount": 98,
-        "sizeBytes": 4567,
-        "lastModified": "2025-01-12T10:30:45.123Z"
-      }
-    }
-  }
-}
-```
+Clean up session.
+
+**Returns:** `ok`
+
+### Enhancement Tools
+
+#### `trm.validateCandidate`
+
+Dry-run validation with detailed preview before applying changes.
+
+**Parameters:** `sessionId`, `candidate`
+
+**Returns:** `valid`, `errors`, `warnings`, `preview` (filesAffected, linesAdded/Removed/Modified, before/after previews)
 
 **Benefits:**
-- File metadata prevents line number errors by showing exact line count before generating edits
-
-### `trm.validateCandidate`
-
-Validate candidate changes without applying them (dry-run with preview).
-
-**Parameters:**
-- `sessionId` (required): Session UUID
-- `candidate` (required): Same format as `trm.submitCandidate`
-
-**Returns:**
-```json
-{
-  "valid": true,
-  "errors": [],
-  "warnings": [
-    "File src/utils/validation.ts: Large change detected (50+ lines)"
-  ],
-  "preview": {
-    "filesAffected": ["src/utils/validation.ts", "src/types.ts"],
-    "linesAdded": 23,
-    "linesRemoved": 8,
-    "linesModified": 15,
-    "filesPreviews": [
-      {
-        "file": "src/utils/validation.ts",
-        "beforeLines": [
-          "15: export function validatePath(path: string): boolean {",
-          "16:   return path.startsWith('/');",
-          "17: }"
-        ],
-        "afterLines": [
-          "15: export function validatePath(path: string): boolean {",
-          "16:   if (!path) return false;",
-          "17:   return path.startsWith('/');",
-          "18: }"
-        ],
-        "linesAdded": 1,
-        "linesRemoved": 0,
-        "changeType": "modification"
-      }
-    ]
-  }
-}
-```
-
-**Benefits:**
-- Pre-apply validation detects errors before submission (invalid line numbers, duplicate declarations)
-- Detailed preview shows exactly what will change with before/after context
+- Catch errors before submission (invalid line numbers, duplicates)
+- See exactly what will change with before/after context
 - Significantly reduces failed iterations
+
+#### `trm.getSuggestions`
+
+Get AI-powered improvement suggestions based on evaluation results and code analysis.
+
+**Returns:** Top 5 suggestions sorted by priority (critical → high → medium → low)
+
+#### `trm.saveCheckpoint`, `trm.restoreCheckpoint`, `trm.listCheckpoints`
+
+Save/restore session state for snapshot-based workflows.
+
+#### `trm.resetToBaseline`
+
+Reset repository to initial git commit state.
+
+### Advanced Tools
+
+#### `trm.undoLastCandidate`
+
+Quick undo with full state restoration.
+
+**Returns:** `message`, `currentStep`, `score`, `emaScore`, `filesRestored`
+
+**How it works:**
+- Captures file contents before applying each candidate
+- On undo: restores files, rolls back step counter, recalculates scores/EMA/streak
+- No git commands needed - uses internal snapshots
+
+**Example:**
+```javascript
+// Submit fails badly (score drops from 0.85 to 0.25)
+await trm.submitCandidate({ sessionId: "...", candidate: {...} });
+
+// Immediately undo - back to previous state
+await trm.undoLastCandidate({ sessionId: "..." });
+// Session restored to previous step with score 0.85 ✅
+```
+
+#### `trm.getFileLines`
+
+Read specific line range from a file with line numbers.
+
+**Parameters:** `sessionId`, `file`, `startLine`, `endLine`
+
+**Returns:** Lines with formatted line numbers, total lineCount
+
+**Benefits:**
+- 10-15% token savings on large files
+- Line numbers included for easy reference
+- Perfect for targeted fixes around error locations
+
+**Example:**
+```javascript
+// Error at line 50 - read context (lines 45-56)
+const context = await trm.getFileLines({
+  sessionId: "...",
+  file: "src/parser.ts",
+  startLine: 45,
+  endLine: 56
+});
+// Returns: ["45: export function...", "46:   try {", ...]
+```
+
+#### `trm.suggestFix`
+
+AI-powered fix candidate generation based on error analysis.
+
+**Supported errors:** TS2304 (missing imports), TS7006 (implicit any), TS2339 (void property access)
+
+**Returns:** Array of suggestions with `priority`, `issue`, `candidateToFix`, `rationale`
+
+**Example:**
+```javascript
+// Iteration fails with TypeScript errors
+const result = await trm.submitCandidate({ /* ... */ });
+
+// Get AI-generated fixes
+const fixes = await trm.suggestFix({ sessionId: "..." });
+
+// Apply suggested fix (or validate first)
+await trm.submitCandidate({
+  sessionId: "...",
+  candidate: fixes.suggestions[0].candidateToFix,
+  rationale: fixes.suggestions[0].rationale
+});
+```
 
 ## Recommended Workflow
 
-### 1. Start a session
-
-```javascript
-// Call via MCP client
-{
-  "tool": "trm.startSession",
-  "arguments": {
-    "repoPath": "/absolute/path/to/project",
-    "buildCmd": "tsc -p . --noEmit",
-    "testCmd": "npm test --silent -- --reporter=json",
-    "lintCmd": "npm run lint",
-    "weights": {
-      "build": 0.25,
-      "test": 0.55,
-      "lint": 0.10,
-      "perf": 0.10
-    },
-    "halt": {
-      "maxSteps": 12,
-      "passThreshold": 0.97,
-      "patienceNoImprove": 3,
-      "minSteps": 2
-    },
-    "emaAlpha": 0.9,
-    "zNotes": "Target: fix failing authentication tests and optimize token validation."
-  }
-}
-```
-
-### 2. Recursive improvement loop
-
-The LLM should:
-
-1. **Propose minimal, targeted patch** for one specific issue
-2. **Call `trm.submitCandidate`** with:
-   - Candidate changes (files or patch)
-   - Rationale explaining why this change improves score/tests/perf
-3. **Read feedback**: `score`, `emaScore`, `tests`, `feedback` array
-4. **If `shouldHalt=false`**: Analyze feedback and propose next small patch
-5. **If `shouldHalt=true`**: Stop iteration
-
-**Key principles:**
-- Keep patches **small and focused** (one issue at a time)
-- Maximize **delta information per step** (TRM philosophy)
-- Use `rationale` to maintain context across steps
-- Trust the score/feedback signals for guidance
-
-### 3. Example iteration
-
-```javascript
-// Step 1: Fix type error
-{
-  "tool": "trm.submitCandidate",
-  "arguments": {
-    "sessionId": "...",
-    "candidate": {
-      "mode": "files",
-      "files": [{
-        "path": "src/auth/validator.ts",
-        "content": "/* updated content with type fix */"
-      }]
-    },
-    "rationale": "Fixed TokenPayload type mismatch in validateToken function. This should resolve the build error without changing behavior."
-  }
-}
-// Response: score=0.45, shouldHalt=false, feedback=["Build passed", "Tests: 38/44 passed"]
-
-// Step 2: Fix failing test
-{
-  "tool": "trm.submitCandidate",
-  "arguments": {
-    "sessionId": "...",
-    "candidate": {
-      "mode": "files",
-      "files": [{
-        "path": "src/auth/validator.ts",
-        "content": "/* updated with proper null check */"
-      }]
-    },
-    "rationale": "Added null check for expired tokens. This addresses the 'should reject expired tokens' test failure."
-  }
-}
-// Response: score=0.72, shouldHalt=false, feedback=["Tests: 42/44 passed"]
-
-// Continue until shouldHalt=true...
-```
-
-## Advanced Features & Workflows
-
-### File Metadata for Accurate Edits
-**Problem:** LLMs would try to insert after line 100 in a 98-line file, causing failures.
-**Solution:** Return line count, file size, and last modified timestamp.
-
-```javascript
-// Without metadata: No way to know file has 98 lines
-await trm.submitCandidate({
-  candidate: {
-    mode: "modify",
-    changes: [{
-      file: "src/parser.ts",
-      edits: [{ type: "insertAfter", line: 100, content: "..." }] // ❌ File only has 98 lines!
-    }]
-  }
-});
-
-// With metadata: Check file info first
-const { files } = await trm.getFileContent({
-  sessionId: "...",
-  paths: ["src/parser.ts"]
-});
-console.log(files["src/parser.ts"].metadata.lineCount); // 98
-// Now use correct line number ✅
-```
-
-### Pre-Apply Validation
-**Problem:** Errors only discovered after applying changes, wasting iterations.
-**Solution:** Validate before submitting with detailed error messages.
-
-```javascript
-// Validate first (dry-run)
-const validation = await trm.validateCandidate({
-  sessionId: "...",
-  candidate: {
-    mode: "modify",
-    changes: [{
-      file: "src/utils/validation.ts",
-      edits: [
-        { type: "insertAfter", line: 7, content: "export function sanitizeOutput() {}" }
-      ]
-    }]
-  }
-});
-
-if (!validation.valid) {
-  console.log(validation.errors);
-  // [{
-  //   error: "Duplicate declaration detected",
-  //   code: "DUPLICATE_DECLARATION",
-  //   details: {
-  //     symbol: "sanitizeOutput",
-  //     existingLine: 9,
-  //     suggestion: "Function 'sanitizeOutput' already exists at line 9. Use 'replace' instead."
-  //   }
-  // }]
-
-  // Fix the issue and try again ✅
-}
-```
-
-### Detailed Change Previews
-**Problem:** Unclear what changes will actually be applied.
-**Solution:** Preview shows before/after with line numbers.
-
-```javascript
-const validation = await trm.validateCandidate({ /* ... */ });
-console.log(validation.preview.filesPreviews[0]);
-// {
-//   file: "src/utils/validation.ts",
-//   beforeLines: [
-//     "15: export function validatePath(path: string): boolean {",
-//     "16:   return path.startsWith('/');",
-//     "17: }"
-//   ],
-//   afterLines: [
-//     "15: export function validatePath(path: string): boolean {",
-//     "16:   if (!path) return false;",
-//     "17:   return path.startsWith('/');",
-//     "18: }"
-//   ],
-//   linesAdded: 1,
-//   linesRemoved: 0,
-//   changeType: "modification"
-// }
-```
-
-### Intelligent Mode Suggestions
-**Problem:** LLMs don't know which submission mode is optimal for their changes.
-**Solution:** Automatic mode recommendations based on change patterns.
-
-```javascript
-// LLM submits using 'diff' mode for small changes
-const result = await trm.submitCandidate({
-  candidate: {
-    mode: "diff",
-    changes: [{ path: "src/parser.ts", diff: "..." }] // Small, targeted change
-  }
-});
-
-// Server suggests better mode
-console.log(result.modeSuggestion);
-// {
-//   recommended: "modify",
-//   reason: "You're making small targeted changes. 'modify' mode provides better precision and clearer error messages than 'diff' mode.",
-//   confidence: "high",
-//   alternatives: {
-//     diff: "Continue using for changes spanning multiple sections",
-//     patch: "Use when coordinating changes across multiple files"
-//   }
-// }
-
-// Next iteration: LLM switches to 'modify' mode ✅
-```
-
-### Error Correlation and Context
-**Problem:** Build fails with cryptic errors, unclear which iteration caused it.
-**Solution:** Automatic correlation of errors to recent file changes.
-
-```javascript
-// Iteration 3 modifies src/parser.ts
-await trm.submitCandidate({
-  candidate: { mode: "modify", changes: [{ file: "src/parser.ts", edits: [...] }] }
-});
-
-// Build fails with TypeScript error
-const result = await trm.submitCandidate({ /* iteration 4 */ });
-console.log(result.feedback);
-// [
-//   "Build failed with 1 error",
-//   "src/parser.ts:45:10 - error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'.",
-//   "🔍 Error likely caused by changes in iteration 3:",
-//   "   - src/parser.ts",
-//   "📍 Last successful build: iteration 2 (score from history)",
-//   "💡 Suggestion: Review changes in iteration 3. Check for type mismatches, missing imports, or syntax errors."
-// ]
-
-// LLM now knows to revert/fix iteration 3 changes ✅
-```
-
-### Preflight Validation
-**Problem:** Start session, wait for first iteration, then discover build command doesn't exist.
-**Solution:** Optional preflight checks validate setup before iterating.
+### 1. Start Session with Preflight
 
 ```javascript
 const session = await trm.startSession({
-  repoPath: "/path/to/project",
-  buildCmd: "tsc -p . --noEmit",
-  testCmd: "npm test",
-  preflight: true, // ✅ Run validation checks
-  halt: { maxSteps: 10, passThreshold: 0.95, patienceNoImprove: 3 }
-});
-
-console.log(session.preflight);
-// {
-//   repoStatus: {
-//     gitRepo: true,
-//     uncommittedChanges: false
-//   },
-//   commands: {
-//     build: { status: "available", estimatedTime: "~3s" },
-//     test: { status: "available", estimatedTime: "~5s" },
-//     lint: { status: "unavailable" } // ⚠️ Warning: lint command not configured
-//   },
-//   initialBuild: {
-//     success: true,
-//     warnings: ["2 files with 'any' type detected"]
-//   }
-// }
-
-// If build failed, fix before starting iterations ✅
-```
-
-### Cascading Error Detection
-**Problem:** One error causes multiple downstream failures.
-**Solution:** Detect cascading patterns and suggest root cause fix.
-
-```javascript
-// After 3 iterations with progressively more test failures
-const result = await trm.submitCandidate({ /* ... */ });
-console.log(result.feedback);
-// [
-//   "Tests: 10/44 passed (degrading from 42/44)",
-//   "💡 Pattern detected: Test failures are increasing - may indicate fundamental issue",
-//   "💡 Suggestion: Consider reverting to last successful iteration (step 2) and trying a different approach."
-// ]
-```
-
-### Combined Workflow Example
-
-```javascript
-// 1. Start with preflight validation
-const session = await trm.startSession({
-  repoPath: "/path/to/project",
+  repoPath: "/absolute/path/to/project",
   buildCmd: "tsc -p . --noEmit",
   testCmd: "npm test --silent -- --reporter=json",
-  preflight: true,
+  preflight: true, // Validate setup before iterating
   halt: { maxSteps: 12, passThreshold: 0.97, patienceNoImprove: 3 }
 });
 
@@ -587,22 +239,41 @@ if (!session.preflight.initialBuild.success) {
   console.log("Fix build before iterating");
   return;
 }
+```
 
-// 2. Get file metadata to avoid line number errors
+### 2. Iterative Improvement Loop
+
+**Key principles:**
+- Keep patches **small and focused** (one issue at a time)
+- Maximize **delta information per step** (TRM philosophy)
+- Use `rationale` to maintain context across steps
+- Trust the score/feedback signals for guidance
+
+**Pattern:**
+1. Get file metadata to avoid line number errors
+2. Validate changes before submitting
+3. Submit candidate with rationale
+4. If fails: use `suggestFix` or `undoLastCandidate`
+5. Repeat until `shouldHalt=true`
+
+### 3. Example with Advanced Features
+
+```javascript
+// 1. Get file metadata
 const { files } = await trm.getFileContent({
   sessionId: session.sessionId,
   paths: ["src/parser.ts"]
 });
-const lineCount = files["src/parser.ts"].metadata.lineCount; // 98
+const lineCount = files["src/parser.ts"].metadata.lineCount;
 
-// 3. Validate changes before submitting
+// 2. Validate before submitting
 const validation = await trm.validateCandidate({
   sessionId: session.sessionId,
   candidate: {
     mode: "modify",
     changes: [{
       file: "src/parser.ts",
-      edits: [{ type: "insertAfter", line: lineCount, content: "..." }] // Use actual line count
+      edits: [{ type: "insertAfter", line: lineCount, content: "..." }]
     }]
   }
 });
@@ -612,339 +283,72 @@ if (!validation.valid) {
   return;
 }
 
-// 4. Submit and use mode suggestions
+// 3. Submit
 const result = await trm.submitCandidate({
   sessionId: session.sessionId,
-  candidate: validation.preview.candidate, // Use validated candidate
-  rationale: "Adding error handling for edge case"
+  candidate: validation.preview.candidate,
+  rationale: "Adding error handling"
 });
 
-if (result.modeSuggestion) {
-  console.log(`Consider using '${result.modeSuggestion.recommended}' mode: ${result.modeSuggestion.reason}`);
-}
-
-// 5. Use error correlation for debugging
+// 4. Handle failures
 if (!result.okBuild) {
-  const errorContext = result.feedback.filter(f => f.startsWith("🔍") || f.startsWith("💡"));
-  console.log("Error context:", errorContext);
-}
-```
-
-### Quick Undo with `trm.undoLastCandidate`
-**Problem:** Failed iterations require manual git commands to revert changes.
-**Solution:** One-command rollback with automatic state restoration.
-
-**Tool: `trm.undoLastCandidate`**
-
-Undo the last candidate submission and restore previous file state, scores, and session state.
-
-**Parameters:**
-- `sessionId` (required): Session UUID
-
-**Returns:**
-```json
-{
-  "success": true,
-  "message": "Successfully undone candidate from step 5. Restored 3 files to previous state.",
-  "previousStep": 4,
-  "previousScore": 0.85,
-  "previousEmaScore": 0.83,
-  "filesRestored": [
-    "src/parser.ts",
-    "src/utils/validation.ts",
-    "src/types.ts"
-  ]
-}
-```
-
-**Usage Example:**
-```javascript
-// Submit a candidate that fails badly
-const result = await trm.submitCandidate({
-  sessionId: "...",
-  candidate: { mode: "modify", changes: [...] },
-  rationale: "Attempting risky refactor"
-});
-
-console.log(result.score); // 0.25 (dropped from 0.85!)
-
-// Immediately undo - restores files and state
-const undoResult = await trm.undoLastCandidate({
-  sessionId: "..."
-});
-
-// Session is now back to step 4 with score 0.85 ✅
-```
-
-**How It Works:**
-- Captures file contents **before** applying each candidate
-- Stores complete snapshot (candidate, rationale, evalResult, timestamp)
-- On undo: restores files, rolls back step counter, recalculates scores/EMA/streak
-- Removes undone entry from history and candidateSnapshots
-
-**Error Handling:**
-```json
-{
-  "error": "No candidate to undo - no previous submissions in this session"
-}
-```
-
-### Incremental File Reading with `trm.getFileLines`
-**Problem:** Reading entire 2000-line files wastes tokens when only needing lines 500-520.
-**Solution:** Range-based reading with line number formatting.
-
-**Tool: `trm.getFileLines`**
-
-Read a specific line range from a file with formatted line numbers.
-
-**Parameters:**
-- `sessionId` (required): Session UUID
-- `file` (required): Relative path to file
-- `startLine` (required): Starting line number (1-based, inclusive)
-- `endLine` (required): Ending line number (1-based, inclusive)
-
-**Returns:**
-```json
-{
-  "file": "src/parser.ts",
-  "lines": [
-    "45: export function parseTestOutput(raw: string): TestResult {",
-    "46:   try {",
-    "47:     const parsed = JSON.parse(raw);",
-    "48:     return {",
-    "49:       passed: parsed.numPassedTests,",
-    "50:       failed: parsed.numFailedTests,",
-    "51:       total: parsed.numTotalTests",
-    "52:     };",
-    "53:   } catch (err) {",
-    "54:     return fallbackParse(raw);",
-    "55:   }",
-    "56: }"
-  ],
-  "lineCount": 234
-}
-```
-
-**Usage Example:**
-```javascript
-// Error message points to line 50
-const errorFeedback = "src/parser.ts:50:10 - error TS2339: Property 'numFailedTests' does not exist";
-
-// Read just the context around line 50 (±5 lines)
-const context = await trm.getFileLines({
-  sessionId: "...",
-  file: "src/parser.ts",
-  startLine: 45,
-  endLine: 56
-});
-
-// Now have full context with line numbers for precise fix ✅
-// Generate fix targeting exact line 50
-```
-
-**Benefits:**
-- **10-15% token savings** on large files (only read what's needed)
-- **Line numbers included** in output for easy reference
-- **Returns total lineCount** for validation
-- **Auto-clamps endLine** to actual file length
-
-**Error Handling:**
-```json
-{
-  "error": "Line validation failed",
-  "code": "INVALID_LINE_RANGE",
-  "details": {
-    "requestedLine": 250,
-    "actualLineCount": 234,
-    "suggestion": "Requested line 250 exceeds file length (234 lines). Use endLine <= 234."
-  }
-}
-```
-
-### Auto-Suggest Fixes with `trm.suggestFix`
-**Problem:** Errors provide diagnosis but LLM must manually craft fix candidates.
-**Solution:** AI-powered fix generation with ready-to-apply candidates.
-
-**Tool: `trm.suggestFix`**
-
-Generate actionable fix candidates based on error analysis from the last evaluation.
-
-**Parameters:**
-- `sessionId` (required): Session UUID
-
-**Returns:**
-```json
-{
-  "suggestions": [
-    {
-      "priority": "high",
-      "issue": "Missing import for 'SessionState' in src/server.ts:45",
-      "candidateToFix": {
-        "mode": "modify",
-        "changes": [{
-          "file": "src/server.ts",
-          "edits": [{
-            "type": "insertAfter",
-            "line": 1,
-            "content": "import { SessionState } from \"./types.js\"; // TODO: Verify import path"
-          }]
-        }]
-      },
-      "rationale": "Add missing import for 'SessionState' to fix TS2304 error"
-    },
-    {
-      "priority": "medium",
-      "issue": "Implicit 'any' type for parameter 'result' in src/parser.ts:78",
-      "candidateToFix": {
-        "mode": "modify",
-        "changes": [{
-          "file": "src/parser.ts",
-          "edits": [{
-            "type": "replace",
-            "oldText": "result",
-            "newText": "result: any // TODO: Add proper type",
-            "all": false
-          }]
-        }]
-      },
-      "rationale": "Add explicit 'any' type annotation for parameter 'result'"
-    }
-  ],
-  "message": "Generated 2 fix candidate(s)"
-}
-```
-
-**Supported Error Types:**
-- **TS2304**: Cannot find name (missing imports)
-- **TS7006**: Implicit 'any' type (missing type annotations)
-- **TS2339**: Property does not exist on type 'void' (void return value access)
-
-**Usage Example:**
-```javascript
-// Iteration fails with TypeScript errors
-const result = await trm.submitCandidate({ /* ... */ });
-console.log(result.feedback);
-// [
-//   "Build failed with 2 errors",
-//   "src/server.ts:45:10 - error TS2304: Cannot find name 'SessionState'",
-//   "src/parser.ts:78:20 - error TS7006: Parameter 'result' implicitly has an 'any' type"
-// ]
-
-// Get AI-generated fix suggestions
-const fixes = await trm.suggestFix({ sessionId: "..." });
-
-// Review top suggestions (sorted by priority)
-console.log(fixes.suggestions[0]);
-// { priority: "high", issue: "Missing import...", candidateToFix: {...} }
-
-// Apply the suggested fix directly
-await trm.submitCandidate({
-  sessionId: "...",
-  candidate: fixes.suggestions[0].candidateToFix,
-  rationale: fixes.suggestions[0].rationale
-});
-
-// Or validate first
-await trm.validateCandidate({
-  sessionId: "...",
-  candidate: fixes.suggestions[0].candidateToFix
-});
-```
-
-**Priority Levels:**
-- **critical**: Blocking errors preventing compilation
-- **high**: Type safety issues, missing imports
-- **medium**: Code quality issues (implicit any, etc.)
-- **low**: Style issues, suggestions
-
-**Response When No Errors:**
-```json
-{
-  "suggestions": [],
-  "message": "No errors detected in last evaluation"
-}
-```
-
-**Response When No Evaluation Yet:**
-```json
-{
-  "suggestions": [],
-  "message": "No evaluations yet - run submitCandidate first"
-}
-```
-
-### Combined Workflow Example
-
-```javascript
-// Start session with advanced features
-const session = await trm.startSession({
-  repoPath: "/path/to/project",
-  buildCmd: "tsc -p . --noEmit",
-  testCmd: "npm test --silent -- --reporter=json",
-  preflight: true,
-  halt: { maxSteps: 15, passThreshold: 0.97, patienceNoImprove: 3 }
-});
-
-// Submit a candidate that fails
-const result = await trm.submitCandidate({
-  sessionId: session.sessionId,
-  candidate: { mode: "modify", changes: [...] },
-  rationale: "Refactoring error handling"
-});
-
-if (!result.okBuild) {
-  // Get AI-generated fix suggestions
+  // Try AI-generated fixes
   const fixes = await trm.suggestFix({ sessionId: session.sessionId });
 
   if (fixes.suggestions.length > 0) {
-    // Validate the suggested fix first
-    const validation = await trm.validateCandidate({
+    await trm.submitCandidate({
       sessionId: session.sessionId,
-      candidate: fixes.suggestions[0].candidateToFix
+      candidate: fixes.suggestions[0].candidateToFix,
+      rationale: `Auto-fix: ${fixes.suggestions[0].rationale}`
     });
-
-    if (validation.valid) {
-      // Apply the fix
-      await trm.submitCandidate({
-        sessionId: session.sessionId,
-        candidate: fixes.suggestions[0].candidateToFix,
-        rationale: `Auto-fix: ${fixes.suggestions[0].rationale}`
-      });
-    } else {
-      console.log("Suggested fix has issues:", validation.errors);
-    }
   } else {
-    // No auto-fix available - try manual fix
-    // If manual fix also fails, undo and try different approach
-    const manualResult = await trm.submitCandidate({ /* manual fix */ });
-
-    if (manualResult.score < result.score) {
-      // Made it worse! Undo immediately
-      await trm.undoLastCandidate({ sessionId: session.sessionId });
-      console.log("Undone - back to previous state");
-    }
+    // Or undo and try different approach
+    await trm.undoLastCandidate({ sessionId: session.sessionId });
   }
 }
 
-// For targeted fixes, read just the relevant lines
-const errorLine = 145;
-const context = await trm.getFileLines({
-  sessionId: session.sessionId,
-  file: "src/parser.ts",
-  startLine: errorLine - 10,
-  endLine: errorLine + 10
-});
-
-// Use the context with line numbers to craft precise fix
-console.log(context.lines);
-// ["135: function parseOutput() {", "136:   ...", ...]
+// 5. For targeted fixes, read just relevant lines
+if (result.feedback.includes("line 145")) {
+  const context = await trm.getFileLines({
+    sessionId: session.sessionId,
+    file: "src/parser.ts",
+    startLine: 135,
+    endLine: 155
+  });
+  // Use context with line numbers for precise fix
+}
 ```
 
-### Performance Benefits
+## Submission Modes
+
+**Recommended (new)**:
+- `create`: New files only (validates file doesn't exist)
+- `modify`: Semantic edit operations (replace, insertBefore, insertAfter, replaceLine, deleteRange, etc.)
+
+**Example modify mode:**
+```typescript
+{
+  mode: "modify",
+  changes: [{
+    file: "src/server.ts",
+    edits: [
+      { type: "replace", oldText: "err: any", newText: "err: unknown", all: true },
+      { type: "insertAfter", line: 150, content: "const NEW_CONSTANT = 42;" }
+    ]
+  }]
+}
+```
+
+**Legacy (still supported)**:
+- `diff`: Per-file unified diffs (uses custom fuzzy-matching patcher)
+- `patch`: Single unified diff for multiple files
+- `files`: Complete file contents (for rewrites)
+
+## Performance Benefits
 
 | Feature | Time Savings | Token Savings | Use Case |
 |---------|-------------|---------------|----------|
-| Quick Undo | 5-10% | - | Instantly recover from failed iterations |
+| Quick Undo | 5-10% | - | Instant recovery from failed iterations |
 | Incremental File Reading | 10-15% | 30-50% | Large files, focused edits |
 | Auto-Suggest Fixes | 15-20% | - | TypeScript errors, common patterns |
 | Pre-Apply Validation | 20-30% | - | Catch errors before submission |
@@ -955,23 +359,6 @@ console.log(context.lines);
 - Significantly faster iteration sessions on error-heavy workloads
 - Reduced token usage when working with large files
 - Fewer wasted iterations due to validation and error correlation
-
-## Design Philosophy (TRM → MCP)
-
-- **y (current solution)**: The **repo state** after each patch applied by the LLM
-- **z (latent reasoning)**: `rationale` and `zNotes` maintain context of how/why we reached current state (TRM-style memory without verbose CoT)
-- **Deep supervision / recursion**: Each `submitCandidate` is a **refinement step**; score/EMA provide "deep supervision" guiding convergence
-- **ACT simplified**: `shouldHalt` uses clear rules (tests pass + threshold, patience exhausted, maxSteps)
-- **Less is more**: Small patches, short loops, objective signals (build/test/lint/bench), no training needed
-
-## Practical Tips
-
-1. **Enable JSON test reporters** (Jest/Vitest) for accurate score calculation
-2. **Keep patches small** to maximize information per step (TRM principle)
-3. **Adjust `weights`** based on objective (e.g., more weight to `perf` when tests are green)
-4. **Use `benchCmd`** that outputs a single number (e.g., milliseconds) for "lower-is-better" perf metric
-5. **For TypeScript**: Use `tsc --noEmit` in `buildCmd` for fast type error detection
-6. **Pre-commit alignment**: Use same commands in local pre-commit hooks for consistency
 
 ## Score Calculation
 
@@ -995,6 +382,28 @@ Iteration stops when:
 2. **Plateau**: No improvement for `patienceNoImprove` consecutive steps
 3. **Limit**: Reached `maxSteps`
 
+## Design Philosophy (TRM → MCP)
+
+- **y (current solution)**: The **repo state** after each patch applied by the LLM
+- **z (latent reasoning)**: `rationale` and `zNotes` maintain context of how/why we reached current state
+- **Deep supervision**: Each `submitCandidate` is a **refinement step**; score/EMA provide objective feedback
+- **ACT halting**: `shouldHalt` uses clear rules (tests pass + threshold, patience exhausted, maxSteps)
+- **Small patches**: Maximize information per step (TRM principle)
+- **No training needed**: Pure test-time refinement using existing dev tools
+
+## Practical Tips
+
+1. **Enable JSON test reporters** (Jest/Vitest) for accurate score calculation
+2. **Keep patches small** to maximize information per step (TRM principle)
+3. **Adjust `weights`** based on objective (e.g., more weight to `perf` when tests are green)
+4. **Use `benchCmd`** that outputs a single number (e.g., milliseconds) for performance tracking
+5. **For TypeScript**: Use `tsc --noEmit` in `buildCmd` for fast type error detection
+6. **Use preflight validation** to catch setup issues before iterating
+7. **Validate candidates** before submitting to reduce failed iterations
+8. **Use `getFileLines`** for large files to save tokens
+9. **Try `suggestFix`** when stuck on TypeScript errors
+10. **Use `undoLastCandidate`** to quickly recover from bad changes
+
 ## Architecture
 
 ```
@@ -1016,6 +425,7 @@ Iteration stops when:
 │  • Test results, build status                               │
 │  • Improvement streak tracking                              │
 │  • History of evaluations                                   │
+│  • Candidate snapshots (for undo)                           │
 │                                                              │
 │  Evaluation Pipeline:                                       │
 │  1. Apply candidate changes                                 │
