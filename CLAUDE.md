@@ -74,28 +74,32 @@ src/
 
 **Key refactoring**: candidate.ts reduced from 401 lines (complexity 73) to 247 lines (complexity 30) by extracting utilities.
 
-## MCP Tools (15 total)
+## MCP Tools (15 total - Ultra-Optimized)
+
+**Note**: Tool names are shortened for token efficiency. Parameter names also shortened (sid vs sessionId, repo vs repoPath, etc). See `docs/MIGRATION_COMPLETE.md` for full mapping.
 
 **Core (6)**:
-1. `trm.startSession` - Initialize session
-2. `trm.submitCandidate` - Apply changes and evaluate
-3. `trm.getFileContent` - Read files with metadata
-4. `trm.getState` - Get session state
-5. `trm.shouldHalt` - Check halting decision
-6. `trm.endSession` - Cleanup
+1. `trm.start` - Initialize session (was startSession)
+2. `trm.submit` - Apply changes and evaluate (was submitCandidate)
+3. `trm.read` - Read files with metadata (was getFileContent)
+4. `trm.state` - Get session state (was getState)
+5. `trm.halt` - Check halting decision (was shouldHalt)
+6. `trm.end` - Cleanup (was endSession)
 
 **Enhancement (6)**:
-7. `trm.validateCandidate` - Dry-run validation
-8. `trm.getSuggestions` - AI suggestions
-9. `trm.saveCheckpoint` - Save state
-10. `trm.restoreCheckpoint` - Restore state
-11. `trm.listCheckpoints` - List checkpoints
-12. `trm.resetToBaseline` - Git reset
+7. `trm.validate` - Dry-run validation (was validateCandidate)
+8. `trm.suggest` - AI suggestions (was getSuggestions)
+9. `trm.save` - Save state (was saveCheckpoint)
+10. `trm.restore` - Restore state (was restoreCheckpoint)
+11. `trm.list` - List checkpoints (was listCheckpoints)
+12. `trm.reset` - Git reset (was resetToBaseline)
 
 **Advanced (3)**:
-13. `trm.undoLastCandidate` - Quick undo
-14. `trm.getFileLines` - Read line ranges
-15. `trm.suggestFix` - AI fix generation
+13. `trm.undo` - Quick undo (was undoLastCandidate)
+14. `trm.lines` - Read line ranges (was getFileLines)
+15. `trm.fix` - AI fix generation (was suggestFix)
+
+**Token savings**: 660 tokens (28%) via shortened names + compressed descriptions
 
 ## Submission Modes
 
@@ -161,8 +165,19 @@ where each signal ∈ [0, 1]
 - **Small patches**: Maximize information per step
 - **No training**: Pure test-time refinement
 
+## Token Optimization
+
+**Active**: Ultra-optimized schema (28% reduction, 660 tokens saved)
+- Shortened tool names (`trm.submit` vs `trm.submitCandidate`)
+- Shortened property names (`sid` vs `sessionId`)
+- Translation layer: `param-translator.ts` maps short→original for handlers
+
+See `docs/MIGRATION_COMPLETE.md` for details, `docs/ULTRA_OPTIMIZATION.md` for full guide.
+
 ## Documentation
 
 - `TRM_IMPROVEMENTS.md`: Phase 1-3 enhancements with examples
 - `REFACTORING.md`: Server and handler refactoring details
 - `README.md`: User-facing documentation
+- `docs/MIGRATION_COMPLETE.md`: Ultra optimization details
+- `docs/ULTRA_OPTIMIZATION.md`: Complete optimization guide

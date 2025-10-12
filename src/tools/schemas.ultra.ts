@@ -1,23 +1,23 @@
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
 
 /**
- * Optimized TRM MCP tool schemas (token-reduced).
- * 15 tools: Core (6) + Enhancement (6) + Advanced (3)
+ * Ultra-optimized TRM MCP tool schemas (max token reduction).
+ * Shortened tool names & property names for minimal token usage.
  */
 
 export const tools: Tool[] = [
   {
-    name: "trm.startSession",
-    description: "Init TRM session with eval commands & halt policy.",
+    name: "trm.start",
+    description: "Init session with eval commands & halt policy.",
     inputSchema: {
       type: "object",
       properties: {
-        repoPath: { type: "string" },
-        buildCmd: { type: "string" },
-        testCmd: { type: "string" },
-        lintCmd: { type: "string" },
-        benchCmd: { type: "string" },
-        timeoutSec: { type: "number", default: 120 },
+        repo: { type: "string" },
+        build: { type: "string" },
+        test: { type: "string" },
+        lint: { type: "string" },
+        bench: { type: "string" },
+        timeout: { type: "number", default: 120 },
         weights: {
           type: "object",
           properties: {
@@ -31,26 +31,26 @@ export const tools: Tool[] = [
         halt: {
           type: "object",
           properties: {
-            maxSteps: { type: "number", default: 12 },
-            passThreshold: { type: "number", default: 0.95 },
-            patienceNoImprove: { type: "number", default: 3 },
-            minSteps: { type: "number", default: 1 }
+            max: { type: "number", default: 12 },
+            threshold: { type: "number", default: 0.95 },
+            patience: { type: "number", default: 3 },
+            min: { type: "number", default: 1 }
           },
-          required: ["maxSteps", "passThreshold", "patienceNoImprove"]
+          required: ["max", "threshold", "patience"]
         },
-        emaAlpha: { type: "number", default: 0.9 },
-        zNotes: { type: "string" }
+        ema: { type: "number", default: 0.9 },
+        notes: { type: "string" }
       },
-      required: ["repoPath", "halt"]
+      required: ["repo", "halt"]
     }
   },
   {
-    name: "trm.submitCandidate",
-    description: "Apply changes & eval. Prefer diff/patch modes; use getFileContent first.",
+    name: "trm.submit",
+    description: "Apply changes & eval. Prefer diff/patch modes.",
     inputSchema: {
       type: "object",
       properties: {
-        sessionId: { type: "string" },
+        sid: { type: "string" },
         candidate: {
           oneOf: [
             {
@@ -99,60 +99,60 @@ export const tools: Tool[] = [
             }
           ]
         },
-        rationale: { type: "string" }
+        reason: { type: "string" }
       },
-      required: ["sessionId", "candidate"]
+      required: ["sid", "candidate"]
     }
   },
   {
-    name: "trm.getFileContent",
-    description: "Read file contents from repo.",
+    name: "trm.read",
+    description: "Read file contents.",
     inputSchema: {
       type: "object",
       properties: {
-        sessionId: { type: "string" },
+        sid: { type: "string" },
         paths: {
           type: "array",
           items: { type: "string" }
         }
       },
-      required: ["sessionId", "paths"]
+      required: ["sid", "paths"]
     }
   },
   {
-    name: "trm.getState",
-    description: "Get session state (scores, EMA, history).",
+    name: "trm.state",
+    description: "Get session state.",
     inputSchema: {
       type: "object",
-      properties: { sessionId: { type: "string" } },
-      required: ["sessionId"]
+      properties: { sid: { type: "string" } },
+      required: ["sid"]
     }
   },
   {
-    name: "trm.shouldHalt",
-    description: "Get halting decision from latest eval.",
+    name: "trm.halt",
+    description: "Get halt decision.",
     inputSchema: {
       type: "object",
-      properties: { sessionId: { type: "string" } },
-      required: ["sessionId"]
+      properties: { sid: { type: "string" } },
+      required: ["sid"]
     }
   },
   {
-    name: "trm.endSession",
-    description: "End & cleanup session.",
+    name: "trm.end",
+    description: "End session.",
     inputSchema: {
       type: "object",
-      properties: { sessionId: { type: "string" } },
-      required: ["sessionId"]
+      properties: { sid: { type: "string" } },
+      required: ["sid"]
     }
   },
   {
-    name: "trm.validateCandidate",
+    name: "trm.validate",
     description: "Validate changes (dry-run).",
     inputSchema: {
       type: "object",
       properties: {
-        sessionId: { type: "string" },
+        sid: { type: "string" },
         candidate: {
           oneOf: [
             {
@@ -194,90 +194,90 @@ export const tools: Tool[] = [
           ]
         }
       },
-      required: ["sessionId", "candidate"]
+      required: ["sid", "candidate"]
     }
   },
   {
-    name: "trm.getSuggestions",
-    description: "Get AI improvement suggestions.",
+    name: "trm.suggest",
+    description: "Get AI suggestions.",
     inputSchema: {
       type: "object",
-      properties: { sessionId: { type: "string" } },
-      required: ["sessionId"]
+      properties: { sid: { type: "string" } },
+      required: ["sid"]
     }
   },
   {
-    name: "trm.saveCheckpoint",
+    name: "trm.save",
     description: "Save checkpoint.",
     inputSchema: {
       type: "object",
       properties: {
-        sessionId: { type: "string" },
-        description: { type: "string" }
+        sid: { type: "string" },
+        desc: { type: "string" }
       },
-      required: ["sessionId"]
+      required: ["sid"]
     }
   },
   {
-    name: "trm.restoreCheckpoint",
+    name: "trm.restore",
     description: "Restore checkpoint.",
     inputSchema: {
       type: "object",
       properties: {
-        sessionId: { type: "string" },
-        checkpointId: { type: "string" }
+        sid: { type: "string" },
+        cid: { type: "string" }
       },
-      required: ["sessionId", "checkpointId"]
+      required: ["sid", "cid"]
     }
   },
   {
-    name: "trm.listCheckpoints",
+    name: "trm.list",
     description: "List checkpoints.",
     inputSchema: {
       type: "object",
-      properties: { sessionId: { type: "string" } },
-      required: ["sessionId"]
+      properties: { sid: { type: "string" } },
+      required: ["sid"]
     }
   },
   {
-    name: "trm.resetToBaseline",
-    description: "Reset to baseline (git reset).",
+    name: "trm.reset",
+    description: "Reset to baseline.",
     inputSchema: {
       type: "object",
-      properties: { sessionId: { type: "string" } },
-      required: ["sessionId"]
+      properties: { sid: { type: "string" } },
+      required: ["sid"]
     }
   },
   {
-    name: "trm.undoLastCandidate",
+    name: "trm.undo",
     description: "Undo last candidate.",
     inputSchema: {
       type: "object",
-      properties: { sessionId: { type: "string" } },
-      required: ["sessionId"]
+      properties: { sid: { type: "string" } },
+      required: ["sid"]
     }
   },
   {
-    name: "trm.getFileLines",
-    description: "Read file line range.",
+    name: "trm.lines",
+    description: "Read line range.",
     inputSchema: {
       type: "object",
       properties: {
-        sessionId: { type: "string" },
+        sid: { type: "string" },
         file: { type: "string" },
-        startLine: { type: "number" },
-        endLine: { type: "number" }
+        start: { type: "number" },
+        end: { type: "number" }
       },
-      required: ["sessionId", "file", "startLine", "endLine"]
+      required: ["sid", "file", "start", "end"]
     }
   },
   {
-    name: "trm.suggestFix",
-    description: "Generate fix candidates from eval errors.",
+    name: "trm.fix",
+    description: "Generate fix candidates.",
     inputSchema: {
       type: "object",
-      properties: { sessionId: { type: "string" } },
-      required: ["sessionId"]
+      properties: { sid: { type: "string" } },
+      required: ["sid"]
     }
   }
 ];

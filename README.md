@@ -360,6 +360,29 @@ if (result.feedback.includes("line 145")) {
 - Reduced token usage when working with large files
 - Fewer wasted iterations due to validation and error correlation
 
+## Token Optimization
+
+The MCP tool schemas have been optimized to minimize token usage while preserving full functionality:
+
+**Optimization results:**
+- **4% reduction** in total MCP token usage (384 tokens saved)
+- **15 tools** optimized from 9,618 tokens to 9,234 tokens
+- **No functionality loss** - all parameters, types, and features unchanged
+
+**What was optimized:**
+- Concise tool descriptions without verbose explanations
+- Removed redundant property descriptions
+- Eliminated inline examples from schemas
+- Streamlined text while maintaining clarity
+
+**Impact:**
+- Frees up 384 tokens in your context window
+- Equivalent to ~100 additional lines of code context
+- MCP protocol overhead (~7,200 tokens) remains the main bottleneck
+
+**Implementation:**
+Ultra-optimized schemas are active. For analysis and bigger token savings strategies, see `TOKEN_OPTIMIZATION.md` and `token-comparison.md`.
+
 ## Score Calculation
 
 Score is a weighted average in [0, 1]:
