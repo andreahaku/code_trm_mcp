@@ -44,7 +44,17 @@ import {
   SCORE_IMPROVEMENT_EPSILON,
   MAX_HINT_LINES,
   MAX_FEEDBACK_ITEMS,
-  MAX_FILE_READ_PATHS
+  MAX_FILE_READ_PATHS,
+  DEFAULT_TIMEOUT_SEC,
+  DEFAULT_LINT_TIMEOUT_MIN_SEC,
+  DEFAULT_WEIGHT_BUILD,
+  DEFAULT_WEIGHT_TEST,
+  DEFAULT_WEIGHT_LINT,
+  DEFAULT_WEIGHT_PERF,
+  DEFAULT_MIN_STEPS,
+  DEFAULT_EMA_ALPHA,
+  LINT_TIMEOUT_DIVISOR,
+  FIRST_STEP
 } from "./constants.js";
 
 // Import validation utilities
@@ -407,18 +417,18 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           testCmd: p.testCmd,
           lintCmd: p.lintCmd,
           benchCmd: p.benchCmd,
-          timeoutSec: p.timeoutSec ?? 120,
+          timeoutSec: p.timeoutSec ?? DEFAULT_TIMEOUT_SEC,
           weights: {
-            build: p.weights?.build ?? 0.3,
-            test: p.weights?.test ?? 0.5,
-            lint: p.weights?.lint ?? 0.1,
-            perf: p.weights?.perf ?? 0.1
+            build: p.weights?.build ?? DEFAULT_WEIGHT_BUILD,
+            test: p.weights?.test ?? DEFAULT_WEIGHT_TEST,
+            lint: p.weights?.lint ?? DEFAULT_WEIGHT_LINT,
+            perf: p.weights?.perf ?? DEFAULT_WEIGHT_PERF
           },
           halt: {
             maxSteps: p.halt.maxSteps,
             passThreshold: p.halt.passThreshold,
             patienceNoImprove: p.halt.patienceNoImprove,
-            minSteps: p.halt.minSteps ?? 1
+            minSteps: p.halt.minSteps ?? DEFAULT_MIN_STEPS
           }
         };
         // Get current git commit as baseline (if in git repo)
@@ -437,7 +447,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           step: 0,
           bestScore: 0,
           emaScore: 0,
-          emaAlpha: p.emaAlpha ?? 0.9,
+          emaAlpha: p.emaAlpha ?? DEFAULT_EMA_ALPHA,
           noImproveStreak: 0,
           history: [],
           zNotes: p.zNotes || undefined,
@@ -467,11 +477,13 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
         // Evaluate
         state.step += 1;
-        const tSec = state.cfg.timeoutSec ?? 120;
+        const tSec = state.cfg.timeoutSec ?? DEFAULT_TIMEOUT_SEC;
+        // Lint timeout is half of main timeout, with a minimum threshold
+        const lintTimeoutSec = Math.max(DEFAULT_LINT_TIMEOUT_MIN_SEC, tSec / LINT_TIMEOUT_DIVISOR);
 
         const build = await runCmd(state.cfg.buildCmd, state.cfg.repoPath, tSec);
-        const lint = await runCmd(state.cfg.lintCmd, state.cfg.repoPath, Math.max(30, tSec / 2));
         const test = await runCmd(state.cfg.testCmd, state.cfg.repoPath, tSec);
+        const lint = await runCmd(state.cfg.lintCmd, state.cfg.repoPath, lintTimeoutSec);
         const bench = await runCmd(state.cfg.benchCmd, state.cfg.repoPath, tSec);
 
         const testParsed = state.cfg.testCmd ? parseTestOutput(test.stdout || test.stderr || "") : null;
@@ -484,7 +496,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         });
 
         // EMA
-        state.emaScore = state.step === 1 ? score : (state.emaAlpha * state.emaScore + (1 - state.emaAlpha) * score);
+        state.emaScore = state.step === FIRST_STEP ? score
+          : (state.emaAlpha * state.emaScore + (1 - state.emaAlpha) * score);
 
         // Improvement tracking
         if (score > state.bestScore + SCORE_IMPROVEMENT_EPSILON) {
@@ -620,7 +633,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
 
       case "trm.validateCandidate": {
-        const p = req.params.arguments as { sessionId: string; candidate: any };
+        const p = req.params.arguments as { sessionId: string; candidate: CreateSubmission | ModifySubmission };
         const state = sessions.get(p.sessionId);
         if (!state) return { content: [{ type: "text", text: `Unknown session: ${p.sessionId}` }] };
 
