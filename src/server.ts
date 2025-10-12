@@ -19,6 +19,7 @@ import type {
   SessionState,
   EvalResult,
   SessionMode,
+  CommandStatus,
   Checkpoint,
   CreateSubmission,
   ModifySubmission,
@@ -440,13 +441,20 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           // Not in git repo or git not available
         }
 
-        // Validate commands before starting session
+        // Validate commands before starting session and track their status
         const warnings: string[] = [];
+        const commandStatus = {
+          build: "unknown" as CommandStatus,
+          test: "unknown" as CommandStatus,
+          lint: "unknown" as CommandStatus,
+          bench: "unknown" as CommandStatus
+        };
+
         const commandChecks = [
-          { name: "buildCmd", cmd: cfg.buildCmd },
-          { name: "testCmd", cmd: cfg.testCmd },
-          { name: "lintCmd", cmd: cfg.lintCmd },
-          { name: "benchCmd", cmd: cfg.benchCmd }
+          { name: "buildCmd", cmd: cfg.buildCmd, statusKey: "build" as const },
+          { name: "testCmd", cmd: cfg.testCmd, statusKey: "test" as const },
+          { name: "lintCmd", cmd: cfg.lintCmd, statusKey: "lint" as const },
+          { name: "benchCmd", cmd: cfg.benchCmd, statusKey: "bench" as const }
         ];
 
         for (const check of commandChecks) {
@@ -454,11 +462,17 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
             try {
               const result = await runCmd(check.cmd, cfg.repoPath, 5000);
               if (!result.ok && (result.stderr.includes("Missing script") || result.stderr.includes("command not found"))) {
-                warnings.push(`${check.name} "${check.cmd}" may not be available (exit code: ${result.exitCode})`);
+                commandStatus[check.statusKey] = "unavailable";
+                // Don't add warnings for unavailable commands - they're expected
+              } else {
+                commandStatus[check.statusKey] = "available";
               }
             } catch (err) {
+              commandStatus[check.statusKey] = "unknown";
               warnings.push(`${check.name} "${check.cmd}" validation failed: ${err instanceof Error ? err.message : String(err)}`);
             }
+          } else {
+            commandStatus[check.statusKey] = "unavailable";
           }
         }
 
@@ -477,7 +491,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           checkpoints: new Map(),
           baselineCommit,
           modifiedFiles: new Set(),
-          fileSnapshots: new Map()
+          fileSnapshots: new Map(),
+          commandStatus
         };
         sessions.set(id, state);
 
@@ -538,34 +553,58 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           await applyCandidate(state.cfg.repoPath, p.candidate);
         }
 
-        // Track modified files and clear their snapshots
+        // Track modified files and automatically refresh their snapshots
         for (const file of filesBeingModified) {
           state.modifiedFiles.add(file);
-          state.fileSnapshots.delete(file); // Clear snapshot - it's now stale
+          // Automatically refresh context after modification
+          try {
+            const absPath = path.resolve(state.cfg.repoPath, file);
+            const content = await fs.readFile(absPath, "utf8");
+            state.fileSnapshots.set(file, content);
+          } catch (err) {
+            // File might not exist (e.g., deleted) - that's ok
+            state.fileSnapshots.delete(file);
+          }
         }
         if (typeof p.rationale === "string" && p.rationale.trim().length) {
           // Keep only the latest rationale (TRM z feature)
           state.zNotes = p.rationale.slice(0, MAX_RATIONALE_LENGTH);
         }
 
-        // Evaluate
+        // Evaluate (skip unavailable commands)
         state.step += 1;
         const tSec = state.cfg.timeoutSec ?? DEFAULT_TIMEOUT_SEC;
         // Lint timeout is half of main timeout, with a minimum threshold
         const lintTimeoutSec = Math.max(DEFAULT_LINT_TIMEOUT_MIN_SEC, tSec / LINT_TIMEOUT_DIVISOR);
 
-        const build = await runCmd(state.cfg.buildCmd, state.cfg.repoPath, tSec);
-        const test = await runCmd(state.cfg.testCmd, state.cfg.repoPath, tSec);
-        const lint = await runCmd(state.cfg.lintCmd, state.cfg.repoPath, lintTimeoutSec);
-        const bench = await runCmd(state.cfg.benchCmd, state.cfg.repoPath, tSec);
+        // Only run available commands
+        const build = state.commandStatus.build !== "unavailable"
+          ? await runCmd(state.cfg.buildCmd, state.cfg.repoPath, tSec)
+          : { ok: true, stdout: "", stderr: "", exitCode: 0 }; // Skip if unavailable
 
-        const testParsed = state.cfg.testCmd ? parseTestOutput(test.stdout || test.stderr || "") : null;
+        const test = state.commandStatus.test !== "unavailable"
+          ? await runCmd(state.cfg.testCmd, state.cfg.repoPath, tSec)
+          : { ok: true, stdout: "", stderr: "", exitCode: 0 };
+
+        const lint = state.commandStatus.lint !== "unavailable"
+          ? await runCmd(state.cfg.lintCmd, state.cfg.repoPath, lintTimeoutSec)
+          : { ok: true, stdout: "", stderr: "", exitCode: 0 };
+
+        const bench = state.commandStatus.bench !== "unavailable"
+          ? await runCmd(state.cfg.benchCmd, state.cfg.repoPath, tSec)
+          : { ok: true, stdout: "", stderr: "", exitCode: 0 };
+
+        const testParsed = state.cfg.testCmd && state.commandStatus.test !== "unavailable"
+          ? parseTestOutput(test.stdout || test.stderr || "")
+          : null;
 
         const score = scoreFromSignals(state, {
           buildOk: build.ok,
           lintOk: lint.ok,
           tests: testParsed ? { passed: testParsed.passed, total: testParsed.total } : undefined,
-          perf: state.cfg.benchCmd ? { value: parseFloat((bench.stdout || bench.stderr).match(/([\d.]+)$/)?.[1] || "NaN") } : undefined
+          perf: state.cfg.benchCmd && state.commandStatus.bench !== "unavailable"
+            ? { value: parseFloat((bench.stdout || bench.stderr).match(/([\d.]+)$/)?.[1] || "NaN") }
+            : undefined
         });
 
         // EMA
@@ -584,8 +623,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         // Add stale context warnings first (high priority)
         feedback.push(...staleContextWarnings);
 
-        if (!build.ok) feedback.push("Build failed – fix compilation/type errors.");
-        if (state.cfg.testCmd) {
+        // Only report feedback for available commands
+        if (state.commandStatus.build !== "unavailable" && !build.ok) {
+          feedback.push("Build failed – fix compilation/type errors.");
+        }
+        if (state.cfg.testCmd && state.commandStatus.test !== "unavailable") {
           if (!testParsed) {
             feedback.push("Tests output not parsed – prefer JSON reporter or include summary lines.");
           } else {
@@ -593,17 +635,17 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
             if (testParsed.failed > 0) feedback.push(`There are ${testParsed.failed} failing tests.`);
           }
         }
-        if (state.cfg.lintCmd && !lint.ok) {
+        if (state.cfg.lintCmd && state.commandStatus.lint !== "unavailable" && !lint.ok) {
           feedback.push("Lint failed – fix style/static-analysis issues.");
         }
-        if (state.cfg.benchCmd && bench.ok) {
+        if (state.cfg.benchCmd && state.commandStatus.bench !== "unavailable" && bench.ok) {
           feedback.push("Benchmark executed – try improving critical hot paths while keeping correctness.");
         }
 
         const hintLines = [
-          ...diffHints(build.stderr, build.stdout),
-          ...diffHints(test.stderr, test.stdout),
-          ...diffHints(lint.stderr, lint.stdout)
+          ...(state.commandStatus.build !== "unavailable" ? diffHints(build.stderr, build.stdout) : []),
+          ...(state.commandStatus.test !== "unavailable" ? diffHints(test.stderr, test.stdout) : []),
+          ...(state.commandStatus.lint !== "unavailable" ? diffHints(lint.stderr, lint.stdout) : [])
         ].slice(0, MAX_HINT_LINES);
 
         const evalResult: EvalResult = {

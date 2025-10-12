@@ -87,6 +87,8 @@ export type EvalResult = {
 
 export type SessionMode = "cumulative" | "snapshot";
 
+export type CommandStatus = "available" | "unavailable" | "unknown";
+
 export type Checkpoint = {
   id: string;
   timestamp: number;
@@ -114,6 +116,12 @@ export type SessionState = {
   baselineCommit?: string;
   modifiedFiles: Set<string>; // Track files modified in this session for context warnings
   fileSnapshots: Map<string, string>; // Cache of file contents at last read via getFileContent
+  commandStatus: {
+    build: CommandStatus;
+    test: CommandStatus;
+    lint: CommandStatus;
+    bench: CommandStatus;
+  };
 };
 
 // ============= ENHANCED API TYPES =============
