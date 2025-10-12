@@ -9,6 +9,17 @@ import type { Suggestion, SessionState, EvalResult } from "../types.js";
 import { analyzeCodeFileEnhanced } from "./code-analyzer.js";
 
 /**
+ * Suggestion generation thresholds and limits
+ */
+const MAX_FILES_TO_ANALYZE = 5;
+const MAX_LOCATIONS_TO_SHOW = 3;
+const MISSING_DOCS_THRESHOLD = 3;
+const MAGIC_NUMBERS_THRESHOLD = 5;
+const IMPURE_FUNCTIONS_THRESHOLD = 2;
+const PERFORMANCE_REGRESSION_THRESHOLD = 1.1; // 10% regression
+const MAX_SUGGESTIONS_TO_RETURN = 5;
+
+/**
  * Generate smart suggestions based on evaluation results and code analysis
  */
 export async function generateSuggestions(
@@ -54,7 +65,7 @@ export async function generateSuggestions(
 
   const filesToAnalyze = typescriptFiles
     .filter(f => f.endsWith(".ts") || f.endsWith(".tsx"))
-    .slice(0, 5); // Analyze up to 5 files
+    .slice(0, MAX_FILES_TO_ANALYZE);
 
   for (const file of filesToAnalyze) {
     const filePath = path.join(repoPath, "src", file);
@@ -75,7 +86,7 @@ export async function generateSuggestions(
         priority: "high",
         category: "type-safety",
         issue: `${anyTypes.length} usage(s) of 'any' type detected`,
-        locations: anyTypes.slice(0, 3).map(i => ({
+        locations: anyTypes.slice(0, MAX_LOCATIONS_TO_SHOW).map(i => ({
           file: `src/${file}`,
           line: i.line,
           snippet: i.context
@@ -85,7 +96,7 @@ export async function generateSuggestions(
       });
     }
 
-    if (missingDocs.length > 3) {
+    if (missingDocs.length > MISSING_DOCS_THRESHOLD) {
       suggestions.push({
         priority: "medium",
         category: "documentation",
@@ -95,7 +106,7 @@ export async function generateSuggestions(
       });
     }
 
-    if (magicNumbers.length > 5) {
+    if (magicNumbers.length > MAGIC_NUMBERS_THRESHOLD) {
       suggestions.push({
         priority: "low",
         category: "code-quality",
@@ -124,7 +135,7 @@ export async function generateSuggestions(
         priority: "high",
         category: "code-quality",
         issue: `${highComplexity.length} function(s) in ${file} have high cyclomatic complexity`,
-        locations: highComplexity.slice(0, 3).map(i => ({
+        locations: highComplexity.slice(0, MAX_LOCATIONS_TO_SHOW).map(i => ({
           file: `src/${file}`,
           line: i.line,
           snippet: i.message
@@ -140,7 +151,7 @@ export async function generateSuggestions(
         priority: "high",
         category: "code-quality",
         issue: `${deepNesting.length} function(s) in ${file} have deep nesting (reduces testability)`,
-        locations: deepNesting.slice(0, 3).map(i => ({
+        locations: deepNesting.slice(0, MAX_LOCATIONS_TO_SHOW).map(i => ({
           file: `src/${file}`,
           line: i.line,
           snippet: i.message
@@ -151,12 +162,12 @@ export async function generateSuggestions(
     }
 
     // Testability: impure functions
-    if (impureFunctions.length > 2) {
+    if (impureFunctions.length > IMPURE_FUNCTIONS_THRESHOLD) {
       suggestions.push({
         priority: "medium",
         category: "code-quality",
         issue: `${impureFunctions.length} function(s) in ${file} have side effects but unclear naming`,
-        locations: impureFunctions.slice(0, 3).map(i => ({
+        locations: impureFunctions.slice(0, MAX_LOCATIONS_TO_SHOW).map(i => ({
           file: `src/${file}`,
           line: i.line,
           snippet: i.message
@@ -172,7 +183,7 @@ export async function generateSuggestions(
         priority: "medium",
         category: "code-quality",
         issue: `${hardToMock.length} function(s) in ${file} create dependencies internally (hard to test)`,
-        locations: hardToMock.slice(0, 3).map(i => ({
+        locations: hardToMock.slice(0, MAX_LOCATIONS_TO_SHOW).map(i => ({
           file: `src/${file}`,
           line: i.line,
           snippet: i.message
@@ -184,7 +195,7 @@ export async function generateSuggestions(
   }
 
   // Performance suggestions
-  if (lastEval.perf && state.bestPerf && lastEval.perf.value > state.bestPerf * 1.1) {
+  if (lastEval.perf && state.bestPerf && lastEval.perf.value > state.bestPerf * PERFORMANCE_REGRESSION_THRESHOLD) {
     suggestions.push({
       priority: "medium",
       category: "performance",
@@ -198,5 +209,5 @@ export async function generateSuggestions(
   const priorityOrder = { critical: 0, high: 1, medium: 2, low: 3 };
   suggestions.sort((a, b) => priorityOrder[a.priority] - priorityOrder[b.priority]);
 
-  return suggestions.slice(0, 5); // Return top 5 suggestions
+  return suggestions.slice(0, MAX_SUGGESTIONS_TO_RETURN);
 }

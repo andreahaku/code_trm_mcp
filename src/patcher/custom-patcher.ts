@@ -10,12 +10,52 @@ import { validateSafePath } from "../utils/validation.js";
 import { parseUnifiedDiff } from "../utils/parser.js";
 
 /**
+ * Patcher constants
+ */
+const DEFAULT_FUZZY_THRESHOLD = 5; // Search ±5 lines instead of ±2
+const MATCH_SCORE_THRESHOLD = 0.7; // Lowered from 0.8 to be more lenient
+const ERROR_CONTEXT_LINES = 5; // Show 5 lines of context in errors
+const MAX_ERROR_LINE_LENGTH = 100; // Truncate long lines in errors
+
+/**
+ * Normalize a line for comparison (removes leading/trailing whitespace, normalizes internal whitespace)
+ */
+function normalizeLine(line: string): string {
+  return line.trim().replace(/\s+/g, " ");
+}
+
+/**
+ * Calculate similarity between two lines (0-1 score)
+ */
+function lineSimilarity(line1: string, line2: string): number {
+  const norm1 = normalizeLine(line1);
+  const norm2 = normalizeLine(line2);
+
+  // Exact match after normalization
+  if (norm1 === norm2) return 1.0;
+
+  // If one is empty, no similarity
+  if (!norm1 || !norm2) return 0;
+
+  // Simple character overlap ratio
+  const shorter = norm1.length < norm2.length ? norm1 : norm2;
+  const longer = norm1.length >= norm2.length ? norm1 : norm2;
+
+  let matches = 0;
+  for (let i = 0; i < shorter.length; i++) {
+    if (longer.includes(shorter[i])) matches++;
+  }
+
+  return matches / longer.length;
+}
+
+/**
  * Apply a single hunk to file content with fuzzy matching
  */
 export function applyHunk(
   fileLines: string[],
   hunk: any,
-  fuzzyThreshold = 2
+  fuzzyThreshold = DEFAULT_FUZZY_THRESHOLD
 ): { success: boolean; newLines: string[]; error?: EnhancedError } {
   const { oldStart, lines } = hunk;
 
@@ -24,20 +64,20 @@ export function applyHunk(
     .filter((l: any) => l.type === "context" || l.type === "remove")
     .map((l: any) => l.content);
 
-  // Try exact match first
+  // Try exact match first (with normalization)
   let matchIndex = oldStart - 1; // Convert 1-based to 0-based
   let exactMatch = true;
 
   for (let i = 0; i < expectedOldLines.length; i++) {
     const fileLineIndex = matchIndex + i;
     if (fileLineIndex >= fileLines.length ||
-        fileLines[fileLineIndex] !== expectedOldLines[i]) {
+        normalizeLine(fileLines[fileLineIndex]) !== normalizeLine(expectedOldLines[i])) {
       exactMatch = false;
       break;
     }
   }
 
-  // If no exact match, try fuzzy matching
+  // If no exact match, try fuzzy matching with similarity scoring
   if (!exactMatch) {
     let bestMatch = -1;
     let bestMatchScore = 0;
@@ -45,20 +85,29 @@ export function applyHunk(
     for (let start = Math.max(0, oldStart - 1 - fuzzyThreshold);
          start <= Math.min(fileLines.length - expectedOldLines.length, oldStart - 1 + fuzzyThreshold);
          start++) {
-      let matches = 0;
+      let totalSimilarity = 0;
       for (let i = 0; i < expectedOldLines.length; i++) {
-        if (fileLines[start + i] === expectedOldLines[i]) {
-          matches++;
-        }
+        totalSimilarity += lineSimilarity(fileLines[start + i], expectedOldLines[i]);
       }
-      if (matches > bestMatchScore) {
-        bestMatchScore = matches;
+      const avgSimilarity = totalSimilarity / expectedOldLines.length;
+      if (avgSimilarity > bestMatchScore) {
+        bestMatchScore = avgSimilarity;
         bestMatch = start;
       }
     }
 
-    if (bestMatchScore / expectedOldLines.length < 0.8) {
-      // Failed to find good match
+    if (bestMatchScore < MATCH_SCORE_THRESHOLD) {
+      // Failed to find good match - provide detailed error
+      const contextStart = Math.max(0, oldStart - 1 - ERROR_CONTEXT_LINES);
+      const contextEnd = Math.min(fileLines.length, oldStart - 1 + ERROR_CONTEXT_LINES);
+      const actualContext = fileLines.slice(contextStart, contextEnd);
+
+      // Truncate long lines for readability
+      const truncateLine = (line: string) =>
+        line.length > MAX_ERROR_LINE_LENGTH
+          ? line.substring(0, MAX_ERROR_LINE_LENGTH) + "..."
+          : line;
+
       return {
         success: false,
         newLines: fileLines,
@@ -67,11 +116,11 @@ export function applyHunk(
           code: "HUNK_MISMATCH",
           details: {
             failedAt: `line ${oldStart}`,
-            reason: "Expected content not found",
-            expected: expectedOldLines.slice(0, 3).join("\n"),
-            got: fileLines.slice(oldStart - 1, oldStart + 2).join("\n"),
-            suggestion: "Content may have been modified. Use trm.getFileContent to get latest content.",
-            context: `Best match score: ${(bestMatchScore / expectedOldLines.length * 100).toFixed(1)}%`
+            reason: "Expected content not found with sufficient similarity",
+            expected: expectedOldLines.map(truncateLine).join("\n"),
+            got: actualContext.map(truncateLine).join("\n"),
+            suggestion: "Content may have been modified. Use trm.getFileContent to get latest content, or increase fuzzy threshold.",
+            context: `Best match score: ${(bestMatchScore * 100).toFixed(1)}% (threshold: ${(MATCH_SCORE_THRESHOLD * 100).toFixed(0)}%)\nSearched lines ${Math.max(0, oldStart - 1 - fuzzyThreshold)}-${Math.min(fileLines.length, oldStart - 1 + fuzzyThreshold)}`
           }
         }
       };
@@ -108,7 +157,7 @@ export function applyHunk(
 export async function customPatch(
   repoPath: string,
   diff: string,
-  fuzzyThreshold = 2
+  fuzzyThreshold = DEFAULT_FUZZY_THRESHOLD
 ): Promise<{ success: boolean; errors: EnhancedError[] }> {
   const errors: EnhancedError[] = [];
   const parsedDiff = parseUnifiedDiff(diff);

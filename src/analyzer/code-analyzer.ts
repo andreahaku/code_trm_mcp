@@ -7,6 +7,17 @@ import fs from "fs-extra";
 import type { CodeIssue } from "../types.js";
 
 /**
+ * Analysis thresholds and constants
+ */
+const LONG_FUNCTION_THRESHOLD = 100;
+const LARGE_MODULE_THRESHOLD = 500;
+const ASYNC_LOOKAHEAD_LINES = 20;
+const COMPLEXITY_THRESHOLD = 10;
+const COMPLEXITY_WARNING_THRESHOLD = 15;
+const NESTING_THRESHOLD = 4;
+const MIN_FUNCTION_LENGTH_FOR_DI_CHECK = 10;
+
+/**
  * Analyze code file for quality issues
  */
 export async function analyzeCodeFile(filePath: string): Promise<CodeIssue[]> {
@@ -92,7 +103,7 @@ export async function analyzeCodeFile(filePath: string): Promise<CodeIssue[]> {
 
         if (braceCount === 0 && line.includes("}")) {
           const length = i - functionStart + 1;
-          if (length > 100) {
+          if (length > LONG_FUNCTION_THRESHOLD) {
             issues.push({
               type: "long-function",
               severity: "warning",
@@ -110,8 +121,8 @@ export async function analyzeCodeFile(filePath: string): Promise<CodeIssue[]> {
     for (let i = 0; i < lines.length; i++) {
       if (lines[i].match(/async\s+function/) || lines[i].match(/async\s*\(/)) {
         let hasTryCatch = false;
-        // Look ahead 20 lines for try/catch
-        for (let j = i; j < Math.min(i + 20, lines.length); j++) {
+        // Look ahead for try/catch within threshold
+        for (let j = i; j < Math.min(i + ASYNC_LOOKAHEAD_LINES, lines.length); j++) {
           if (lines[j].includes("try {") || lines[j].includes("catch")) {
             hasTryCatch = true;
             break;
@@ -179,7 +190,7 @@ export async function analyzeCodeFileEnhanced(filePath: string): Promise<CodeIss
     const lines = content.split(/\r?\n/);
 
     // 1. Check module size (file length)
-    if (lines.length > 500) {
+    if (lines.length > LARGE_MODULE_THRESHOLD) {
       issues.push({
         type: "large-module",
         severity: "warning",
@@ -219,26 +230,26 @@ export async function analyzeCodeFileEnhanced(filePath: string): Promise<CodeIss
 
           // Check cyclomatic complexity
           const complexity = calculateCyclomaticComplexity(functionLines);
-          if (complexity > 10) {
+          if (complexity > COMPLEXITY_THRESHOLD) {
             issues.push({
               type: "high-complexity",
-              severity: complexity > 15 ? "warning" : "info",
+              severity: complexity > COMPLEXITY_WARNING_THRESHOLD ? "warning" : "info",
               file: filePath,
               line: functionStart + 1,
-              message: `Function '${functionName}' has cyclomatic complexity of ${complexity} (threshold: 10). High complexity makes code harder to test and maintain.`,
+              message: `Function '${functionName}' has cyclomatic complexity of ${complexity} (threshold: ${COMPLEXITY_THRESHOLD}). High complexity makes code harder to test and maintain.`,
               context: `Consider splitting into smaller functions with single responsibilities`
             });
           }
 
           // Check nesting depth
           const maxNesting = detectMaxNesting(functionLines);
-          if (maxNesting > 4) {
+          if (maxNesting > NESTING_THRESHOLD) {
             issues.push({
               type: "deep-nesting",
               severity: "warning",
               file: filePath,
               line: functionStart + 1,
-              message: `Function '${functionName}' has nesting depth of ${maxNesting} (threshold: 4). Deep nesting reduces testability.`,
+              message: `Function '${functionName}' has nesting depth of ${maxNesting} (threshold: ${NESTING_THRESHOLD}). Deep nesting reduces testability.`,
               context: "Consider extracting nested logic into separate functions"
             });
           }
@@ -262,7 +273,7 @@ export async function analyzeCodeFileEnhanced(filePath: string): Promise<CodeIss
           const hasDirectInstantiation = functionLines.some(l =>
             l.match(/new\s+[A-Z][a-zA-Z0-9_]*\(/) && !l.match(/new\s+(Map|Set|Array|Date|Error|Promise)\(/)
           );
-          if (hasDirectInstantiation && functionLines.length > 10) {
+          if (hasDirectInstantiation && functionLines.length > MIN_FUNCTION_LENGTH_FOR_DI_CHECK) {
             issues.push({
               type: "hard-to-mock",
               severity: "info",
