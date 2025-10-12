@@ -130,6 +130,47 @@ export type IterationContext = {
   success: boolean;
 };
 
+export type CandidateSnapshot = {
+  step: number;
+  candidate: any; // Store the full candidate submission
+  rationale?: string;
+  filesBeforeChange: Map<string, string>; // File contents BEFORE this candidate was applied
+  evalResult: EvalResult; // Result after applying this candidate
+  timestamp: number;
+};
+
+export type UndoLastCandidateArgs = {
+  sessionId: string;
+};
+
+export type GetFileLinesArgs = {
+  sessionId: string;
+  file: string;
+  startLine: number;  // 1-based, inclusive
+  endLine: number;    // 1-based, inclusive
+};
+
+export type GetFileLinesResponse = {
+  file: string;
+  lines: string[];      // Lines with line numbers, e.g., "90: function foo() {"
+  lineCount: number;    // Total line count of the file
+};
+
+export type SuggestFixArgs = {
+  sessionId: string;
+};
+
+export type FixSuggestion = {
+  priority: "critical" | "high" | "medium" | "low";
+  issue: string;
+  candidateToFix: ModifySubmission | CreateSubmission;  // Ready-to-apply candidate
+  rationale: string;
+};
+
+export type SuggestFixResponse = {
+  suggestions: FixSuggestion[];
+};
+
 export type SessionState = {
   id: SessionId;
   cfg: SessionConfig;
@@ -154,6 +195,7 @@ export type SessionState = {
     bench: CommandStatus;
   };
   iterationContexts: IterationContext[]; // Track file changes per iteration for error correlation
+  candidateSnapshots: CandidateSnapshot[]; // Store candidate data for undo functionality (Phase 3)
 };
 
 // ============= ENHANCED API TYPES =============

@@ -34,7 +34,13 @@ import type {
   ListCheckpointsArgs,
   ImprovedStartSessionArgs,
   CommandResult,
-  ParsedDiffFile
+  ParsedDiffFile,
+  CandidateSnapshot,
+  UndoLastCandidateArgs,
+  GetFileLinesArgs,
+  GetFileLinesResponse,
+  SuggestFixArgs,
+  FixSuggestion
 } from "./types.js";
 
 // Import constants
@@ -94,6 +100,9 @@ import { generateSuggestions } from "./analyzer/suggestions.js";
 // Import state management modules
 import { saveCheckpoint, restoreCheckpoint, autoCheckpoint } from "./state/checkpoints.js";
 import { resetToBaseline } from "./state/baseline.js";
+
+// Import fix generator utilities
+import { generateFixCandidates } from "./utils/fix-generator.js";
 
 /**
  * TRM-inspired MCP server for recursive code refinement.
@@ -395,6 +404,38 @@ const tools: Tool[] = [
       properties: { sessionId: { type: "string" } },
       required: ["sessionId"]
     }
+  },
+  {
+    name: "trm.undoLastCandidate",
+    description: "Undo the last candidate submission and restore previous file state. Rolls back to the state before the last submitCandidate call.",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: { type: "string" } },
+      required: ["sessionId"]
+    }
+  },
+  {
+    name: "trm.getFileLines",
+    description: "Read a specific line range from a file. Returns lines with line numbers for easy reference. Useful for reading large files incrementally without loading entire content.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string" },
+        file: { type: "string", description: "Relative path to file" },
+        startLine: { type: "number", description: "Starting line number (1-based, inclusive)" },
+        endLine: { type: "number", description: "Ending line number (1-based, inclusive)" }
+      },
+      required: ["sessionId", "file", "startLine", "endLine"]
+    }
+  },
+  {
+    name: "trm.suggestFix",
+    description: "Generate actionable fix candidates based on error analysis from the last evaluation. Returns ready-to-apply candidates that can be directly submitted via trm.submitCandidate. Analyzes TypeScript errors, test failures, and lint issues to provide concrete fix suggestions.",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: { type: "string" } },
+      required: ["sessionId"]
+    }
   }
 ];
 
@@ -549,7 +590,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           modifiedFiles: new Set(),
           fileSnapshots: new Map(),
           commandStatus,
-          iterationContexts: []
+          iterationContexts: [],
+          candidateSnapshots: [] // Phase 3: Store candidate data for undo functionality
         };
         sessions.set(id, state);
 
@@ -600,6 +642,19 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                 `⚠️  ${file} was modified in step ${state.step - 1} but context not refreshed. Use trm.getFileContent to avoid patch failures.`
               );
             }
+          }
+        }
+
+        // Phase 3: Save candidate snapshot BEFORE applying changes (for undo functionality)
+        const filesBeforeChange = new Map<string, string>();
+        for (const file of filesBeingModified) {
+          try {
+            const absPath = path.resolve(state.cfg.repoPath, file);
+            const content = await fs.readFile(absPath, "utf8");
+            filesBeforeChange.set(file, content);
+          } catch (err) {
+            // File might not exist yet (for create mode) - that's ok
+            filesBeforeChange.set(file, ""); // Empty string indicates file didn't exist
           }
         }
 
@@ -772,6 +827,17 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         evalResult.reasons = haltDecision.reasons;
 
         state.history.push(evalResult);
+
+        // Phase 3: Store candidate snapshot AFTER evaluation (for undo functionality)
+        const candidateSnapshot: CandidateSnapshot = {
+          step: state.step,
+          candidate: candidate,
+          rationale: p.rationale,
+          filesBeforeChange: filesBeforeChange,
+          evalResult: evalResult,
+          timestamp: Date.now()
+        };
+        state.candidateSnapshots.push(candidateSnapshot);
 
         // Generate mode suggestion based on candidate structure
         const modeSuggestion = suggestOptimalMode(candidate);
@@ -970,6 +1036,185 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
         await resetToBaseline(state);
         return { content: [{ type: "text", text: JSON.stringify({ message: "Reset to baseline" }, null, 2) }] };
+      }
+
+      case "trm.undoLastCandidate": {
+        const p = req.params.arguments as UndoLastCandidateArgs;
+        const state = sessions.get(p.sessionId);
+        if (!state) return { content: [{ type: "text", text: `Unknown session: ${p.sessionId}` }] };
+
+        // Check if there are snapshots to undo
+        if (state.candidateSnapshots.length === 0) {
+          return { content: [{ type: "text", text: JSON.stringify({ error: "No candidate to undo" }, null, 2) }] };
+        }
+
+        // Get the last snapshot
+        const lastSnapshot = state.candidateSnapshots.pop()!;
+
+        // Restore file contents from before the candidate was applied
+        for (const [file, contentBefore] of lastSnapshot.filesBeforeChange.entries()) {
+          const absPath = path.resolve(state.cfg.repoPath, file);
+          try {
+            if (contentBefore === "") {
+              // File didn't exist before - delete it
+              await fs.remove(absPath);
+            } else {
+              // Restore previous content
+              await fs.writeFile(absPath, contentBefore, "utf8");
+            }
+          } catch (err) {
+            return { content: [{ type: "text", text: JSON.stringify({
+              error: `Failed to restore file ${file}: ${err instanceof Error ? err.message : String(err)}`
+            }, null, 2) }] };
+          }
+        }
+
+        // Roll back state
+        state.step = lastSnapshot.step - 1; // Go back to previous step
+        state.history.pop(); // Remove last eval result
+
+        // Recalculate best score and EMA from remaining history
+        if (state.history.length > 0) {
+          state.bestScore = Math.max(...state.history.map(h => h.score));
+          state.emaScore = state.history[state.history.length - 1].emaScore;
+
+          // Recalculate noImproveStreak
+          let streak = 0;
+          for (let i = state.history.length - 1; i >= 0; i--) {
+            if (state.history[i].score > state.bestScore + SCORE_IMPROVEMENT_EPSILON) {
+              break;
+            }
+            streak++;
+          }
+          state.noImproveStreak = streak;
+        } else {
+          state.bestScore = 0;
+          state.emaScore = 0;
+          state.noImproveStreak = 0;
+        }
+
+        // Remove iteration context
+        if (state.iterationContexts.length > 0) {
+          state.iterationContexts.pop();
+        }
+
+        // Refresh file snapshots for the restored files
+        for (const [file, contentBefore] of lastSnapshot.filesBeforeChange.entries()) {
+          if (contentBefore !== "") {
+            state.fileSnapshots.set(file, contentBefore);
+          } else {
+            state.fileSnapshots.delete(file);
+          }
+        }
+
+        const response = {
+          message: `Undone candidate from step ${lastSnapshot.step}`,
+          currentStep: state.step,
+          score: state.history.length > 0 ? state.history[state.history.length - 1].score : 0,
+          emaScore: state.emaScore,
+          filesRestored: Array.from(lastSnapshot.filesBeforeChange.keys())
+        };
+
+        return { content: [{ type: "text", text: JSON.stringify(response, null, 2) }] };
+      }
+
+      case "trm.getFileLines": {
+        const p = req.params.arguments as GetFileLinesArgs;
+        const state = sessions.get(p.sessionId);
+        if (!state) return { content: [{ type: "text", text: `Unknown session: ${p.sessionId}` }] };
+
+        // Validate path
+        validateSafePath(state.cfg.repoPath, p.file);
+        const absPath = path.resolve(state.cfg.repoPath, p.file);
+
+        // Validate line range
+        if (p.startLine < 1 || p.endLine < 1) {
+          return { content: [{ type: "text", text: JSON.stringify({
+            error: "Line numbers must be >= 1",
+            startLine: p.startLine,
+            endLine: p.endLine
+          }, null, 2) }] };
+        }
+
+        if (p.startLine > p.endLine) {
+          return { content: [{ type: "text", text: JSON.stringify({
+            error: "startLine must be <= endLine",
+            startLine: p.startLine,
+            endLine: p.endLine
+          }, null, 2) }] };
+        }
+
+        try {
+          // Read file content
+          const content = await fs.readFile(absPath, "utf8");
+          const allLines = content.split('\n');
+          const lineCount = allLines.length;
+
+          // Validate that startLine is within bounds
+          if (p.startLine > lineCount) {
+            return { content: [{ type: "text", text: JSON.stringify({
+              error: `startLine ${p.startLine} out of range (file has ${lineCount} lines)`,
+              lineCount
+            }, null, 2) }] };
+          }
+
+          // Extract requested range (1-based to 0-based conversion)
+          const start = p.startLine - 1;
+          const end = Math.min(p.endLine, lineCount); // Clamp to actual line count
+          const selectedLines = allLines.slice(start, end);
+
+          // Format lines with line numbers
+          const formattedLines = selectedLines.map((line, idx) => {
+            const lineNum = p.startLine + idx;
+            return `${lineNum}: ${line}`;
+          });
+
+          const response: GetFileLinesResponse = {
+            file: p.file,
+            lines: formattedLines,
+            lineCount: lineCount
+          };
+
+          return { content: [{ type: "text", text: JSON.stringify(response, null, 2) }] };
+        } catch (err: unknown) {
+          return { content: [{ type: "text", text: JSON.stringify({
+            error: `Failed to read file: ${err instanceof Error ? err.message : String(err)}`,
+            file: p.file
+          }, null, 2) }] };
+        }
+      }
+
+      case "trm.suggestFix": {
+        const p = req.params.arguments as SuggestFixArgs;
+        const state = sessions.get(p.sessionId);
+        if (!state) return { content: [{ type: "text", text: `Unknown session: ${p.sessionId}` }] };
+
+        // Check if there's an evaluation to analyze
+        if (state.history.length === 0) {
+          return { content: [{ type: "text", text: JSON.stringify({
+            suggestions: [],
+            message: "No evaluations yet - run submitCandidate first"
+          }, null, 2) }] };
+        }
+
+        // Get the last evaluation
+        const lastEval = state.history[state.history.length - 1];
+
+        // Check if there are errors to fix
+        if (lastEval.okBuild && (!lastEval.tests || lastEval.tests.failed === 0) && lastEval.okLint) {
+          return { content: [{ type: "text", text: JSON.stringify({
+            suggestions: [],
+            message: "No errors detected in last evaluation"
+          }, null, 2) }] };
+        }
+
+        // Generate fix candidates
+        const suggestions = await generateFixCandidates(state, lastEval);
+
+        return { content: [{ type: "text", text: JSON.stringify({
+          suggestions,
+          message: suggestions.length > 0 ? `Generated ${suggestions.length} fix candidate(s)` : "No actionable fixes could be generated"
+        }, null, 2) }] };
       }
 
       default:
