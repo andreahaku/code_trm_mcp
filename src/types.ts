@@ -27,6 +27,7 @@ export type StartSessionArgs = {
   };
   emaAlpha?: number;
   zNotes?: string;
+  preflight?: boolean; // Run initial validation checks
 };
 
 export type SubmitCandidateArgs = {
@@ -87,6 +88,13 @@ export type SessionConfig = {
   };
 };
 
+export type ModeSuggestion = {
+  recommended: string;
+  reason: string;
+  confidence: "high" | "medium" | "low";
+  alternatives?: Record<string, string>;
+};
+
 export type EvalResult = {
   okBuild?: boolean;
   okLint?: boolean;
@@ -98,6 +106,7 @@ export type EvalResult = {
   feedback: string[];
   shouldHalt: boolean;
   reasons: string[];
+  modeSuggestion?: ModeSuggestion;
 };
 
 export type SessionMode = "cumulative" | "snapshot";
@@ -112,6 +121,13 @@ export type Checkpoint = {
   emaScore: number;
   filesSnapshot: Map<string, string>;
   description?: string;
+};
+
+export type IterationContext = {
+  step: number;
+  filesModified: string[];
+  mode: string;
+  success: boolean;
 };
 
 export type SessionState = {
@@ -137,6 +153,7 @@ export type SessionState = {
     lint: CommandStatus;
     bench: CommandStatus;
   };
+  iterationContexts: IterationContext[]; // Track file changes per iteration for error correlation
 };
 
 // ============= ENHANCED API TYPES =============

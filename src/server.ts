@@ -72,6 +72,12 @@ import { parseCommand, runCmd } from "./utils/command.js";
 // Import scoring utilities
 import { scoreFromSignals, shouldHalt, diffHints } from "./utils/scoring.js";
 
+// Import mode suggestion utilities
+import { suggestOptimalMode, suggestModeFromHistory } from "./utils/mode-suggestion.js";
+
+// Import error context utilities
+import { correlateErrorsToChanges, generateErrorSuggestions, detectCascadingErrors } from "./utils/error-context.js";
+
 // Import parser utilities
 import { parseTestOutput, parseUnifiedDiff } from "./utils/parser.js";
 import { parseTypeScriptErrors, formatTypeScriptError, groupRelatedErrors } from "./utils/ts-error-parser.js";
@@ -477,6 +483,55 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           }
         }
 
+        // Run preflight validation if requested
+        let preflightResults: any = undefined;
+        if (p.preflight) {
+          preflightResults = {
+            repoStatus: {
+              gitRepo: !!baselineCommit,
+              uncommittedChanges: false
+            },
+            commands: {
+              build: { status: commandStatus.build, estimatedTime: "unknown" },
+              test: { status: commandStatus.test },
+              lint: { status: commandStatus.lint },
+              bench: { status: commandStatus.bench }
+            },
+            initialBuild: undefined as any
+          };
+
+          // Check for uncommitted changes
+          if (baselineCommit) {
+            try {
+              const { stdout } = await execa("git", ["status", "--porcelain"], { cwd: cfg.repoPath });
+              preflightResults.repoStatus.uncommittedChanges = stdout.trim().length > 0;
+            } catch {
+              // Ignore git status errors
+            }
+          }
+
+          // Run initial build to establish baseline (if build command available)
+          if (cfg.buildCmd && commandStatus.build === "available") {
+            const buildStartTime = Date.now();
+            const initialBuild = await runCmd(cfg.buildCmd, cfg.repoPath, cfg.timeoutSec ?? DEFAULT_TIMEOUT_SEC);
+            const buildTime = ((Date.now() - buildStartTime) / 1000).toFixed(1);
+
+            preflightResults.commands.build.estimatedTime = `${buildTime}s`;
+            preflightResults.initialBuild = {
+              success: initialBuild.ok,
+              warnings: initialBuild.ok && initialBuild.stdout.includes("warning") ? ["Build succeeded with warnings"] : []
+            };
+
+            // Parse warnings from build output if available
+            if (initialBuild.ok) {
+              const warningMatches = initialBuild.stdout.match(/(\d+)\s+warning/);
+              if (warningMatches) {
+                preflightResults.initialBuild.warnings.push(`${warningMatches[1]} compiler warnings detected`);
+              }
+            }
+          }
+        }
+
         const state: SessionState = {
           id,
           cfg,
@@ -493,7 +548,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           baselineCommit,
           modifiedFiles: new Set(),
           fileSnapshots: new Map(),
-          commandStatus
+          commandStatus,
+          iterationContexts: []
         };
         sessions.set(id, state);
 
@@ -503,6 +559,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         };
         if (warnings.length > 0) {
           response.warnings = warnings;
+        }
+        if (preflightResults) {
+          response.preflightResults = preflightResults;
         }
 
         return {
@@ -620,13 +679,35 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           state.noImproveStreak += 1;
         }
 
+        // Track this iteration's context for error correlation
+        state.iterationContexts.push({
+          step: state.step,
+          filesModified: [...filesBeingModified],
+          mode: candidate.mode,
+          success: build.ok && (!testParsed || testParsed.passed === testParsed.total) && lint.ok
+        });
+
         const feedback: string[] = [];
         // Add stale context warnings first (high priority)
         feedback.push(...staleContextWarnings);
 
-        // Only report feedback for available commands
+        // Use error context correlation for failures
         if (state.commandStatus.build !== "unavailable" && !build.ok) {
           feedback.push("Build failed – fix compilation/type errors.");
+
+          // Correlate errors to recent changes
+          const errorContext = correlateErrorsToChanges(
+            build.stderr + "\n" + build.stdout,
+            state.iterationContexts.slice(-5), // Last 5 iterations
+            state.step
+          );
+
+          // Add correlation analysis
+          feedback.push(...errorContext.analysis);
+
+          // Add actionable suggestions
+          const suggestions = generateErrorSuggestions("build", errorContext.likelyCulprit);
+          feedback.push(...suggestions);
 
           // Parse TypeScript errors and add intelligent suggestions
           const tsErrors = parseTypeScriptErrors(build.stderr + "\n" + build.stdout);
@@ -692,6 +773,29 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
         state.history.push(evalResult);
 
+        // Generate mode suggestion based on candidate structure
+        const modeSuggestion = suggestOptimalMode(candidate);
+
+        // Also check history-based suggestions if there are recent failures
+        if (!modeSuggestion && state.history.length >= 2) {
+          const recentFailures = state.history.slice(-3).filter(h => !h.okBuild).map(h => ({
+            mode: "unknown", // We don't track mode in history yet, but could enhance this
+            error: h.feedback.find(f => f.includes("failed"))
+          }));
+
+          if (recentFailures.length > 0) {
+            const historyBasedSuggestion = suggestModeFromHistory(candidate.mode, recentFailures);
+            if (historyBasedSuggestion) {
+              evalResult.modeSuggestion = historyBasedSuggestion;
+            }
+          }
+        }
+
+        // Add suggestion to eval result if generated
+        if (modeSuggestion) {
+          evalResult.modeSuggestion = modeSuggestion;
+        }
+
         const compact = {
           step: evalResult.step,
           score: evalResult.score,
@@ -703,7 +807,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           okLint: evalResult.okLint,
           shouldHalt: evalResult.shouldHalt,
           reasons: evalResult.reasons,
-          feedback: evalResult.feedback
+          feedback: evalResult.feedback,
+          modeSuggestion: evalResult.modeSuggestion
         };
 
         return { content: [{ type: "text", text: JSON.stringify(compact, null, 2) }] };
