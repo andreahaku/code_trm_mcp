@@ -440,6 +440,28 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           // Not in git repo or git not available
         }
 
+        // Validate commands before starting session
+        const warnings: string[] = [];
+        const commandChecks = [
+          { name: "buildCmd", cmd: cfg.buildCmd },
+          { name: "testCmd", cmd: cfg.testCmd },
+          { name: "lintCmd", cmd: cfg.lintCmd },
+          { name: "benchCmd", cmd: cfg.benchCmd }
+        ];
+
+        for (const check of commandChecks) {
+          if (check.cmd) {
+            try {
+              const result = await runCmd(check.cmd, cfg.repoPath, 5000);
+              if (!result.ok && (result.stderr.includes("Missing script") || result.stderr.includes("command not found"))) {
+                warnings.push(`${check.name} "${check.cmd}" may not be available (exit code: ${result.exitCode})`);
+              }
+            } catch (err) {
+              warnings.push(`${check.name} "${check.cmd}" validation failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+        }
+
         const state: SessionState = {
           id,
           cfg,
@@ -458,8 +480,17 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           fileSnapshots: new Map()
         };
         sessions.set(id, state);
+
+        const response: any = {
+          sessionId: id,
+          message: "TRM session started"
+        };
+        if (warnings.length > 0) {
+          response.warnings = warnings;
+        }
+
         return {
-          content: [{ type: "text", text: JSON.stringify({ sessionId: id, message: "TRM session started" }, null, 2) }]
+          content: [{ type: "text", text: JSON.stringify(response, null, 2) }]
         };
       }
 
