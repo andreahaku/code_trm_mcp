@@ -8,6 +8,62 @@ import path from "path";
 import { execa } from "execa";
 import pc from "picocolors";
 
+// Import types
+import type {
+  SessionId,
+  StartSessionArgs,
+  SubmitCandidateArgs,
+  GetFileContentArgs,
+  SessionIdArgs,
+  SessionConfig,
+  SessionState,
+  EvalResult,
+  SessionMode,
+  Checkpoint,
+  CreateSubmission,
+  ModifySubmission,
+  EditOperation,
+  Suggestion,
+  CodeIssue,
+  EnhancedError,
+  ValidationResult,
+  ImprovedSubmitCandidateArgs,
+  SaveCheckpointArgs,
+  RestoreCheckpointArgs,
+  ListCheckpointsArgs,
+  ImprovedStartSessionArgs,
+  CommandResult,
+  ParsedDiffFile
+} from "./types.js";
+
+// Import constants
+import {
+  MAX_FILE_SIZE,
+  MAX_CANDIDATE_FILES,
+  MAX_RATIONALE_LENGTH,
+  SCORE_IMPROVEMENT_EPSILON,
+  MAX_HINT_LINES,
+  MAX_FEEDBACK_ITEMS,
+  MAX_FILE_READ_PATHS
+} from "./constants.js";
+
+// Import validation utilities
+import {
+  validateSafePath,
+  validateStartSessionArgs,
+  isExecaError,
+  clamp01
+} from "./utils/validation.js";
+
+// Import command utilities
+import { parseCommand, runCmd } from "./utils/command.js";
+
+// Import scoring utilities
+import { scoreFromSignals, shouldHalt, diffHints } from "./utils/scoring.js";
+
+// Import parser utilities
+import { parseTestOutput, parseUnifiedDiff } from "./utils/parser.js";
+
 /**
  * TRM-inspired MCP server for recursive code refinement.
  *
@@ -43,632 +99,9 @@ import pc from "picocolors";
  *  - No network access, only local cmds.
  */
 
-type SessionId = string;
-
-// Tool argument types for type safety
-type StartSessionArgs = {
-  repoPath: string;
-  buildCmd?: string;
-  testCmd?: string;
-  lintCmd?: string;
-  benchCmd?: string;
-  timeoutSec?: number;
-  weights?: {
-    build?: number;
-    test?: number;
-    lint?: number;
-    perf?: number;
-  };
-  halt: {
-    maxSteps: number;
-    passThreshold: number;
-    patienceNoImprove: number;
-    minSteps?: number;
-  };
-  emaAlpha?: number;
-  zNotes?: string;
-};
-
-type SubmitCandidateArgs = {
-  sessionId: string;
-  candidate:
-    | { mode: "diff"; changes: { path: string; diff: string }[] }
-    | { mode: "patch"; patch: string }
-    | { mode: "files"; files: { path: string; content: string }[] };
-  rationale?: string;
-};
-
-type GetFileContentArgs = {
-  sessionId: string;
-  paths: string[];
-};
-
-type SessionIdArgs = {
-  sessionId: string;
-};
-
-type SessionConfig = {
-  repoPath: string;
-  buildCmd?: string;       // e.g., "npm run build" or "tsc -p . --noEmit"
-  testCmd?: string;        // e.g., "npm test --silent -- --reporter=json"
-  lintCmd?: string;        // e.g., "npm run lint" or "eslint ."
-  benchCmd?: string;       // optional perf
-  timeoutSec?: number;     // per cmd timeout
-  weights: {
-    build: number; // 0..1
-    test: number;  // 0..1
-    lint: number;  // 0..1
-    perf: number;  // 0..1
-  };
-  halt: {
-    maxSteps: number;          // hard limit
-    passThreshold: number;     // score to accept when tests pass
-    patienceNoImprove: number; // steps without improvement
-    minSteps?: number;         // optional minimum before halting
-  };
-};
-
-type EvalResult = {
-  okBuild?: boolean;
-  okLint?: boolean;
-  tests?: { passed: number; failed: number; total: number; raw?: string };
-  perf?: { value: number; unit?: string }; // lower-is-better by default, configurable if needed
-  score: number;           // 0..1
-  emaScore: number;        // 0..1
-  step: number;            // 1-based
-  feedback: string[];      // compact actionable signals for LLM
-  shouldHalt: boolean;
-  reasons: string[];
-};
-
-type SessionState = {
-  id: SessionId;
-  cfg: SessionConfig;
-  createdAt: number;
-  step: number;
-  bestScore: number;
-  emaScore: number;
-  emaAlpha: number; // e.g., 0.9
-  noImproveStreak: number;
-  history: EvalResult[];
-  // TRM-like latent memo (optional); LLM may supply rationale here
-  zNotes?: string;
-  // perf baseline to normalize (best lower value)
-  bestPerf?: number;
-  // NEW: State management
-  mode: SessionMode;
-  checkpoints: Map<string, Checkpoint>;
-  baselineCommit?: string;
-};
-
-// ============= NEW IMPROVED API TYPES =============
-
-/**
- * Session iteration mode
- */
-type SessionMode = "cumulative" | "snapshot";
-
-/**
- * Checkpoint for state restoration
- */
-type Checkpoint = {
-  id: string;
-  timestamp: number;
-  step: number;
-  score: number;
-  emaScore: number;
-  filesSnapshot: Map<string, string>;
-  description?: string;
-};
-
-/**
- * Enhanced submission modes - simplified to create vs modify
- */
-type CreateSubmission = {
-  mode: "create";
-  files: Array<{ path: string; content: string }>;
-};
-
-type ModifySubmission = {
-  mode: "modify";
-  changes: ModifyChange[];
-};
-
-type ModifyChange = {
-  file: string;
-  edits: EditOperation[];
-};
-
-/**
- * Semantic edit operations for intuitive code modifications
- */
-type EditOperation =
-  | { type: "replace"; oldText: string; newText: string; all?: boolean }
-  | { type: "insertBefore"; line: number; content: string }
-  | { type: "insertAfter"; line: number; content: string }
-  | { type: "replaceLine"; line: number; content: string }
-  | { type: "replaceRange"; startLine: number; endLine: number; content: string }
-  | { type: "deleteLine"; line: number }
-  | { type: "deleteRange"; startLine: number; endLine: number };
-
-/**
- * Smart suggestions for code improvements
- */
-type Suggestion = {
-  priority: "critical" | "high" | "medium" | "low";
-  category: "type-safety" | "documentation" | "performance" | "test-coverage" | "code-quality" | "security";
-  issue: string;
-  locations?: Array<{ file: string; line?: number; snippet?: string }>;
-  suggestedFix?: string;
-  autoFixable: boolean;
-};
-
-/**
- * Code quality issues detected by analyzer
- */
-type CodeIssue = {
-  type: "any-type" | "missing-jsdoc" | "magic-number" | "long-function" | "high-complexity" | "no-error-handling"
-      | "large-module" | "deep-nesting" | "impure-function" | "hard-to-mock";
-  severity: "error" | "warning" | "info";
-  file: string;
-  line?: number;
-  column?: number;
-  message: string;
-  context?: string;
-};
-
-/**
- * Enhanced error details for better debugging
- */
-type EnhancedError = {
-  error: string;
-  code: string;
-  details: {
-    failedAt?: string;
-    reason?: string;
-    expected?: string;
-    got?: string;
-    suggestion?: string;
-    context?: string;
-  };
-};
-
-/**
- * Validation result for dry-run operations
- */
-type ValidationResult = {
-  valid: boolean;
-  errors: EnhancedError[];
-  warnings: string[];
-  preview?: {
-    filesAffected: string[];
-    linesAdded: number;
-    linesRemoved: number;
-    linesModified: number;
-  };
-};
-
-/**
- * New submission args with improved API
- */
-type ImprovedSubmitCandidateArgs = {
-  sessionId: string;
-  candidate: CreateSubmission | ModifySubmission;
-  rationale?: string;
-  dryRun?: boolean;
-};
-
-/**
- * Checkpoint management args
- */
-type SaveCheckpointArgs = {
-  sessionId: string;
-  description?: string;
-};
-
-type RestoreCheckpointArgs = {
-  sessionId: string;
-  checkpointId: string;
-};
-
-type ListCheckpointsArgs = {
-  sessionId: string;
-};
-
-/**
- * Enhanced start session with state management
- */
-type ImprovedStartSessionArgs = StartSessionArgs & {
-  mode?: SessionMode;
-  autoCommit?: boolean;
-  autoReset?: boolean;
-  autoCheckpoint?: boolean;
-};
-
 const sessions = new Map<SessionId, SessionState>();
 
-// Constants
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB per file
-const MAX_CANDIDATE_FILES = 100; // Maximum files in a single candidate
-const MAX_RATIONALE_LENGTH = 4000; // Maximum length for rationale notes
-const SCORE_IMPROVEMENT_EPSILON = 1e-6; // Minimum improvement threshold
-const MAX_HINT_LINES = 12; // Maximum feedback hint lines
-const MAX_FEEDBACK_ITEMS = 16; // Maximum feedback items in response
-const MAX_FILE_READ_PATHS = 50; // Maximum file paths in single getFileContent request
-
-// ------------- helpers ----------------
-
-/**
- * Type guard to check if an error has expected execa properties.
- */
-function isExecaError(err: unknown): err is { stdout?: string; stderr?: string; exitCode?: number; timedOut?: boolean } {
-  return (
-    typeof err === 'object' && err !== null &&
-    ('stdout' in err || 'stderr' in err || 'exitCode' in err || 'timedOut' in err)
-  );
-}
-
-/**
- * Type alias for command execution results.
- */
-type CommandResult = {
-  ok: boolean;
-  stdout: string;
-  stderr: string;
-  exitCode: number | null;
-};
-
-/**
- * Clamp a number to the range [0, 1].
- */
-function clamp01(x: number): number { return Math.max(0, Math.min(1, x)); }
-
-/**
- * Validate that a path is safe and within the allowed repository.
- * Prevents path traversal attacks.
- */
-function validateSafePath(repoPath: string, targetPath: string): void {
-  const resolvedRepo = path.resolve(repoPath);
-  const resolvedTarget = path.resolve(repoPath, targetPath);
-  
-  if (!resolvedTarget.startsWith(resolvedRepo + path.sep) && resolvedTarget !== resolvedRepo) {
-    throw new Error(`Path traversal detected: ${targetPath} escapes repository boundary`);
-  }
-}
-
-/**
- * Validate startSession arguments.
- */
-async function validateStartSessionArgs(args: StartSessionArgs): Promise<void> {
-  // Validate repoPath exists and is a directory
-  const stat = await fs.stat(args.repoPath).catch(() => null);
-  if (!stat) {
-    throw new Error(`Repository path does not exist: ${args.repoPath}`);
-  }
-  if (!stat.isDirectory()) {
-    throw new Error(`Repository path is not a directory: ${args.repoPath}`);
-  }
-
-  // Validate weights
-  if (args.weights) {
-    const { build, test, lint, perf } = args.weights;
-    if (build !== undefined && (build < 0 || build > 1)) {
-      throw new Error(`Invalid weight for build: ${build} (must be in [0,1])`);
-    }
-    if (test !== undefined && (test < 0 || test > 1)) {
-      throw new Error(`Invalid weight for test: ${test} (must be in [0,1])`);
-    }
-    if (lint !== undefined && (lint < 0 || lint > 1)) {
-      throw new Error(`Invalid weight for lint: ${lint} (must be in [0,1])`);
-    }
-    if (perf !== undefined && (perf < 0 || perf > 1)) {
-      throw new Error(`Invalid weight for perf: ${perf} (must be in [0,1])`);
-    }
-  }
-
-  // Validate halt parameters
-  if (args.halt.maxSteps < 1) {
-    throw new Error(`maxSteps must be >= 1, got ${args.halt.maxSteps}`);
-  }
-  if (args.halt.passThreshold < 0 || args.halt.passThreshold > 1) {
-    throw new Error(`passThreshold must be in [0,1], got ${args.halt.passThreshold}`);
-  }
-  if (args.halt.patienceNoImprove < 1) {
-    throw new Error(`patienceNoImprove must be >= 1, got ${args.halt.patienceNoImprove}`);
-  }
-  if (args.halt.minSteps !== undefined && args.halt.minSteps < 1) {
-    throw new Error(`minSteps must be >= 1, got ${args.halt.minSteps}`);
-  }
-
-  // Validate emaAlpha
-  if (args.emaAlpha !== undefined && (args.emaAlpha < 0 || args.emaAlpha > 1)) {
-    throw new Error(`emaAlpha must be in [0,1], got ${args.emaAlpha}`);
-  }
-
-  // Validate timeout
-  if (args.timeoutSec !== undefined && args.timeoutSec < 1) {
-    throw new Error(`timeoutSec must be >= 1, got ${args.timeoutSec}`);
-  }
-}
-
-/**
- * Parse a command string into program and arguments, respecting quotes.
- * Example: 'npm test --silent -- --reporter="json"' -> ['npm', 'test', '--silent', '--', '--reporter=json']
- */
-function parseCommand(cmd: string): { bin: string; args: string[] } {
-  const tokens: string[] = [];
-  let current = "";
-  let inQuote = false;
-  let quoteChar = "";
-
-  for (let i = 0; i < cmd.length; i++) {
-    const char = cmd[i];
-
-    if ((char === '"' || char === "'") && (!inQuote || quoteChar === char)) {
-      if (inQuote && quoteChar === char) {
-        inQuote = false;
-        quoteChar = "";
-      } else if (!inQuote) {
-        inQuote = true;
-        quoteChar = char;
-      }
-    } else if (char === " " && !inQuote) {
-      if (current) {
-        tokens.push(current);
-        current = "";
-      }
-    } else {
-      current += char;
-    }
-  }
-
-  if (current) tokens.push(current);
-  
-  if (inQuote) {
-    throw new Error(`Unclosed quote in command: ${cmd}`);
-  }
-
-  if (tokens.length === 0) throw new Error("Empty command");
-  const [bin, ...args] = tokens;
-  return { bin, args };
-}
-
-/**
- * Execute a command with timeout and error handling.
- * Returns undefined command as success with empty output.
- */
-async function runCmd(cmd: string | undefined, cwd: string, timeoutSec: number): Promise<CommandResult> {
-  if (!cmd) return { ok: true, stdout: "", stderr: "", exitCode: 0 };
-
-  try {
-    const { bin, args } = parseCommand(cmd);
-    const { stdout, stderr, exitCode } = await execa(bin, args, { cwd, timeout: timeoutSec * 1000, shell: false });
-    return { ok: (exitCode ?? 0) === 0, stdout, stderr, exitCode: exitCode ?? 0 };
-  } catch (err: unknown) {
-    // Handle timeout specifically
-    if (isExecaError(err) && err.timedOut) {
-      return {
-        ok: false,
-        stdout: err.stdout ?? "",
-        stderr: `Command timed out after ${timeoutSec}s\n${err.stderr ?? ""}`,
-        exitCode: -1
-      };
-    }
-    if (isExecaError(err)) {
-      return { ok: false, stdout: err.stdout ?? "", stderr: err.stderr ?? String(err), exitCode: err.exitCode ?? -1 };
-    }
-    // Fallback for unexpected errors
-    return { ok: false, stdout: "", stderr: String(err), exitCode: -1 };
-  }
-}
-
-/**
- * Parse test framework output (Jest, Vitest, Mocha) to extract pass/fail counts.
- * Supports both JSON reporters and text summary formats.
- */
-function parseTestOutput(raw: string): { passed: number; failed: number; total: number } | null {
-  // Try to detect jest/mocha minimal info heuristically
-  // Accepts either JSON reporters or summary lines.
-  try {
-    // If JSON array/object with aggregateResults (Jest)
-    const j = JSON.parse(raw);
-    if (j && typeof j === "object") {
-      if (j.numPassedTests !== undefined && j.numFailedTests !== undefined && j.numTotalTests !== undefined) {
-        return { passed: j.numPassedTests, failed: j.numFailedTests, total: j.numTotalTests };
-      }
-      // Vitest reporter?
-      if (j.stats?.passed !== undefined && j.stats?.failed !== undefined && j.stats?.tests !== undefined) {
-        return { passed: j.stats.passed, failed: j.stats.failed, total: j.stats.tests };
-      }
-    }
-  } catch {/* not JSON */}
-  // Fallback: regex on summary line
-  const m = raw.match(/Tests?:\s*(\d+)\s*passed.*?(\d+)\s*total/i) || raw.match(/(\d+)\s*passing.*?(\d+)\s*total/i);
-  if (m) {
-    const passed = Number(m[1]);
-    const total = Number(m[2]);
-    return { passed, failed: total - passed, total };
-  }
-  // Another common: "passed X, failed Y, total Z"
-  const m2 = raw.match(/passed\s*:\s*(\d+).*failed\s*:\s*(\d+).*total\s*:\s*(\d+)/i);
-  if (m2) {
-    const passed = Number(m2[1]), failed = Number(m2[2]), total = Number(m2[3]);
-    return { passed, failed, total };
-  }
-  return null;
-}
-
-/**
- * Compute normalized score from build/test/lint/perf signals.
- * Note: This function has a side effect of updating state.bestPerf for performance tracking.
- *
- * @param state - The session state (modified: bestPerf may be updated)
- * @param signals - Evaluation signals from various checks
- */
-function scoreFromSignals(state: SessionState, signals: {
-  buildOk: boolean;
-  lintOk: boolean;
-  tests?: { passed: number; total: number };
-  perf?: { value: number };
-}): number {
-  const w = state.cfg.weights;
-  let sBuild = signals.buildOk ? 1 : 0;
-  let sLint = signals.lintOk ? 1 : 0;
-
-  let sTests = 0;
-  if (signals.tests && signals.tests.total > 0) {
-    sTests = clamp01(signals.tests.passed / signals.tests.total);
-  } else if (state.cfg.testCmd) {
-    // If tests expected but no parse, be conservative:
-    sTests = 0;
-  }
-
-  // perf: if we have a bestPerf as lower-is-better baseline, normalize in (0,1]
-  let sPerf = 0;
-  if (signals.perf && isFinite(signals.perf.value)) {
-    if (state.bestPerf === undefined) {
-      state.bestPerf = signals.perf.value;
-      sPerf = 1; // first observation is best so far
-    } else {
-      // normalize inversely: score = clamp(best/perf, 0..1)
-      if (signals.perf.value <= 0) {
-        sPerf = 0;
-      } else {
-        sPerf = clamp01(state.bestPerf / signals.perf.value);
-        if (signals.perf.value < state.bestPerf) state.bestPerf = signals.perf.value;
-      }
-    }
-  } else if (state.cfg.benchCmd) {
-    // Expected perf but missing -> 0
-    sPerf = 0;
-  }
-
-  const sumW = w.build + w.test + w.lint + w.perf || 1;
-  const score = clamp01((w.build * sBuild + w.test * sTests + w.lint * sLint + w.perf * sPerf) / sumW);
-  return score;
-}
-
-/**
- * Determine if the refinement loop should halt based on score, improvement, and step count.
- * Implements ACT-like adaptive halting policy.
- */
-function shouldHalt(state: SessionState, last: EvalResult): { halt: boolean; reasons: string[] } {
-  const r: string[] = [];
-  const cfg = state.cfg.halt;
-  const minSteps = cfg.minSteps ?? 1;
-
-  const testsPass = last.tests && last.tests.total > 0 && last.tests.passed === last.tests.total;
-
-  if (state.step >= minSteps && testsPass && last.score >= cfg.passThreshold) {
-    r.push(`tests pass and score ${last.score.toFixed(3)} ≥ threshold ${cfg.passThreshold}`);
-    return { halt: true, reasons: r };
-  }
-
-  if (state.noImproveStreak >= cfg.patienceNoImprove) {
-    r.push(`no improvement for ${state.noImproveStreak} steps (patience=${cfg.patienceNoImprove})`);
-    return { halt: true, reasons: r };
-  }
-
-  if (state.step >= cfg.maxSteps) {
-    r.push(`reached max steps ${cfg.maxSteps}`);
-    return { halt: true, reasons: r };
-  }
-
-  return { halt: false, reasons: [] };
-}
-
-/**
- * Extract actionable error hints from command output (TypeScript, Jest, ESLint patterns).
- * Returns deduplicated hints limited to avoid overwhelming feedback.
- */
-function diffHints(stderr: string, stdout: string): string[] {
-  const hints: string[] = [];
-  const out = `${stdout}\n${stderr}`;
-  // Compact actionable hints (non-exhaustive)
-  const tsErrs = out.match(/^(.+:\d+:\d+ - error .+)$/gmi);
-  if (tsErrs) hints.push(...tsErrs.slice(0, 10));
-  const jestFail = out.match(/● .*? \((\d+)ms\)/g);
-  if (jestFail) hints.push(...jestFail.slice(0, 10));
-  const eslintErr = out.match(/error\s+.+\s+\(.+?\)/g);
-  if (eslintErr) hints.push(...eslintErr.slice(0, 10));
-  // Fallback generic lines
-  if (hints.length === 0) {
-    const lines = out.split(/\r?\n/).filter(l => l.trim().length && l.length < 240);
-    hints.push(...lines.slice(0, 10));
-  }
-  return [...new Set(hints)];
-}
-
 // ============= CUSTOM PATCHER (replaces git apply) =============
-
-/**
- * Parse a unified diff into structured changes
- */
-function parseUnifiedDiff(diff: string): Array<{
-  file: string;
-  hunks: Array<{
-    oldStart: number;
-    oldLines: number;
-    newStart: number;
-    newLines: number;
-    lines: Array<{ type: "context" | "add" | "remove"; content: string }>;
-  }>;
-}> {
-  const result: Array<any> = [];
-  const lines = diff.split(/\r?\n/);
-
-  let currentFile: any = null;
-  let currentHunk: any = null;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-
-    // Parse file header
-    if (line.startsWith("diff --git") || line.startsWith("---")) {
-      if (line.startsWith("---")) {
-        const nextLine = lines[i + 1];
-        if (nextLine?.startsWith("+++")) {
-          const filepath = nextLine.slice(4).trim().replace(/^b\//, "");
-          currentFile = { file: filepath, hunks: [] };
-          result.push(currentFile);
-          i++; // Skip +++ line
-          continue;
-        }
-      }
-    }
-
-    // Parse hunk header
-    if (line.startsWith("@@")) {
-      const match = line.match(/@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@/);
-      if (match && currentFile) {
-        currentHunk = {
-          oldStart: parseInt(match[1]),
-          oldLines: match[2] ? parseInt(match[2]) : 1,
-          newStart: parseInt(match[3]),
-          newLines: match[4] ? parseInt(match[4]) : 1,
-          lines: []
-        };
-        currentFile.hunks.push(currentHunk);
-      }
-      continue;
-    }
-
-    // Parse hunk content
-    if (currentHunk) {
-      if (line.startsWith("+")) {
-        currentHunk.lines.push({ type: "add", content: line.slice(1) });
-      } else if (line.startsWith("-")) {
-        currentHunk.lines.push({ type: "remove", content: line.slice(1) });
-      } else if (line.startsWith(" ")) {
-        currentHunk.lines.push({ type: "context", content: line.slice(1) });
-      } else if (line === "") {
-        currentHunk.lines.push({ type: "context", content: "" });
-      }
-    }
-  }
-
-  return result;
-}
 
 /**
  * Apply a single hunk to file content with fuzzy matching
@@ -2184,10 +1617,10 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     switch (req.params.name) {
       case "trm.startSession": {
         const p = req.params.arguments as StartSessionArgs;
-        
+
         // Validate input arguments
         await validateStartSessionArgs(p);
-        
+
         const id: SessionId = uuidv4();
         const cfg: SessionConfig = {
           repoPath: path.resolve(p.repoPath),
