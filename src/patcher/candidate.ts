@@ -103,7 +103,32 @@ export async function applyImprovedCandidate(
 ): Promise<{ success: boolean; errors: EnhancedError[] }> {
   const errors: EnhancedError[] = [];
 
+  // Validate candidate structure
+  if (!candidate || !candidate.mode) {
+    errors.push({
+      error: "Invalid candidate",
+      code: "INVALID_CANDIDATE",
+      details: {
+        reason: "Candidate must have a 'mode' property",
+        suggestion: "Use mode 'create' or 'modify'"
+      }
+    });
+    return { success: false, errors };
+  }
+
   if (candidate.mode === "create") {
+    // Validate create mode structure
+    if (!candidate.files || !Array.isArray(candidate.files)) {
+      errors.push({
+        error: "Invalid create mode candidate",
+        code: "INVALID_CANDIDATE",
+        details: {
+          reason: "Create mode requires a 'files' array",
+          suggestion: "Provide files: [{ path: string, content: string }]"
+        }
+      });
+      return { success: false, errors };
+    }
     // Create new files
     for (const file of candidate.files) {
       try {
@@ -153,14 +178,49 @@ export async function applyImprovedCandidate(
         });
       }
     }
-  } else {
+  } else if (candidate.mode === "modify") {
+    // Validate modify mode structure
+    if (!candidate.changes || !Array.isArray(candidate.changes)) {
+      errors.push({
+        error: "Invalid modify mode candidate",
+        code: "INVALID_CANDIDATE",
+        details: {
+          reason: "Modify mode requires a 'changes' array",
+          suggestion: "Provide changes: [{ file: string, edits: EditOperation[] }]"
+        }
+      });
+      return { success: false, errors };
+    }
+
     // Modify existing files using edit operations
     for (const change of candidate.changes) {
+      // Validate change structure
+      if (!change.file || !change.edits || !Array.isArray(change.edits)) {
+        errors.push({
+          error: "Invalid change structure",
+          code: "INVALID_CHANGE",
+          details: {
+            failedAt: change.file || "unknown",
+            reason: "Each change must have 'file' (string) and 'edits' (array) properties",
+            suggestion: "Check change format"
+          }
+        });
+        continue;
+      }
       const result = await applyEditOperations(repoPath, change.file, change.edits);
       if (!result.success && result.error) {
         errors.push(result.error);
       }
     }
+  } else {
+    errors.push({
+      error: "Unknown candidate mode",
+      code: "UNKNOWN_MODE",
+      details: {
+        reason: `Mode '${(candidate as any).mode}' is not supported`,
+        suggestion: "Use mode 'create' or 'modify'"
+      }
+    });
   }
 
   return { success: errors.length === 0, errors };

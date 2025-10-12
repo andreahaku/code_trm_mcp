@@ -468,8 +468,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           return { content: [{ type: "text", text: `Unknown session: ${p.sessionId}` }] };
         }
 
-        // Apply candidate
-        await applyCandidate(state.cfg.repoPath, p.candidate);
+        // Apply candidate - handle both legacy and improved modes
+        const candidate = p.candidate as any;
+        if (candidate.mode === "create" || candidate.mode === "modify") {
+          const result = await applyImprovedCandidate(state.cfg.repoPath, candidate);
+          if (!result.success) {
+            throw new Error(`Candidate application failed:\n${JSON.stringify(result.errors, null, 2)}`);
+          }
+        } else {
+          await applyCandidate(state.cfg.repoPath, p.candidate);
+        }
         if (typeof p.rationale === "string" && p.rationale.trim().length) {
           // Keep only the latest rationale (TRM z feature)
           state.zNotes = p.rationale.slice(0, MAX_RATIONALE_LENGTH);
