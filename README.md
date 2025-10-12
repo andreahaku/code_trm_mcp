@@ -53,12 +53,9 @@ Point to the server binary via stdio:
 }
 ```
 
-## Available Tools (15 Total)
+## Available Tools
 
-The server exposes **15 MCP tools** across three phases of enhancements:
-- **Phase 1**: 6 core tools
-- **Phase 2**: 6 enhancement tools
-- **Phase 3**: 3 advanced tools (undo, incremental reading, auto-fix)
+The server exposes **15 MCP tools** for iterative code refinement:
 
 ### `trm.startSession`
 
@@ -83,7 +80,7 @@ Initialize a TRM session on a local repository with evaluation commands and halt
   - `minSteps`: Minimum steps before allowing halt (default: 1)
 - `emaAlpha`: EMA smoothing factor (default: 0.9)
 - `zNotes`: Optional initial reasoning notes/hints
-- `preflight`: Run initial validation checks (default: false) - **Phase 2 Feature**
+- `preflight`: Run initial validation checks (default: false)
 
 **Returns:**
 - `sessionId`: UUID for the session
@@ -177,8 +174,8 @@ Apply candidate changes, run evaluation, update EMA & state, return feedback + s
 }
 ```
 
-**Phase 2 Features:**
-- **Error Correlation**: Feedback now includes analysis showing which iteration likely caused errors (see `🔍` lines)
+**Key Features:**
+- **Error Correlation**: Feedback includes analysis showing which iteration likely caused errors (see `🔍` lines)
 - **Mode Suggestions**: Get intelligent recommendations for optimal submission modes based on your changes
 
 ### `trm.getState`
@@ -218,7 +215,7 @@ End and remove a TRM session.
 **Returns:**
 - `ok`: Boolean confirmation
 
-### `trm.getFileContent` - **Phase 1 Enhanced**
+### `trm.getFileContent`
 
 Read current file state with metadata for generating accurate diffs.
 
@@ -244,10 +241,10 @@ Read current file state with metadata for generating accurate diffs.
 }
 ```
 
-**Phase 1 Feature:**
+**Benefits:**
 - File metadata prevents line number errors by showing exact line count before generating edits
 
-### `trm.validateCandidate` - **Phase 1 New Tool**
+### `trm.validateCandidate`
 
 Validate candidate changes without applying them (dry-run with preview).
 
@@ -291,10 +288,10 @@ Validate candidate changes without applying them (dry-run with preview).
 }
 ```
 
-**Phase 1 Features:**
+**Benefits:**
 - Pre-apply validation detects errors before submission (invalid line numbers, duplicate declarations)
 - Detailed preview shows exactly what will change with before/after context
-- Estimated 50% reduction in failed iterations
+- Significantly reduces failed iterations
 
 ## Recommended Workflow
 
@@ -385,16 +382,14 @@ The LLM should:
 // Continue until shouldHalt=true...
 ```
 
-## Phase 1 & 2 Improvements
+## Advanced Features & Workflows
 
-### Phase 1: Validation Enhancements (50% fewer failed iterations)
-
-#### 1. File Metadata in `getFileContent`
+### File Metadata for Accurate Edits
 **Problem:** LLMs would try to insert after line 100 in a 98-line file, causing failures.
 **Solution:** Return line count, file size, and last modified timestamp.
 
 ```javascript
-// Before Phase 1: No way to know file has 98 lines
+// Without metadata: No way to know file has 98 lines
 await trm.submitCandidate({
   candidate: {
     mode: "modify",
@@ -405,7 +400,7 @@ await trm.submitCandidate({
   }
 });
 
-// After Phase 1: Check metadata first
+// With metadata: Check file info first
 const { files } = await trm.getFileContent({
   sessionId: "...",
   paths: ["src/parser.ts"]
@@ -414,7 +409,7 @@ console.log(files["src/parser.ts"].metadata.lineCount); // 98
 // Now use correct line number ✅
 ```
 
-#### 2. Pre-Apply Validation with `validateCandidate`
+### Pre-Apply Validation
 **Problem:** Errors only discovered after applying changes, wasting iterations.
 **Solution:** Validate before submitting with detailed error messages.
 
@@ -449,7 +444,7 @@ if (!validation.valid) {
 }
 ```
 
-#### 3. Detailed Change Previews
+### Detailed Change Previews
 **Problem:** Unclear what changes will actually be applied.
 **Solution:** Preview shows before/after with line numbers.
 
@@ -475,9 +470,7 @@ console.log(validation.preview.filesPreviews[0]);
 // }
 ```
 
-### Phase 2: UX Enhancements (30-40% efficiency improvement)
-
-#### 1. Intelligent Mode Suggestions
+### Intelligent Mode Suggestions
 **Problem:** LLMs don't know which submission mode is optimal for their changes.
 **Solution:** Automatic mode recommendations based on change patterns.
 
@@ -505,7 +498,7 @@ console.log(result.modeSuggestion);
 // Next iteration: LLM switches to 'modify' mode ✅
 ```
 
-#### 2. Error Correlation and Context
+### Error Correlation and Context
 **Problem:** Build fails with cryptic errors, unclear which iteration caused it.
 **Solution:** Automatic correlation of errors to recent file changes.
 
@@ -530,7 +523,7 @@ console.log(result.feedback);
 // LLM now knows to revert/fix iteration 3 changes ✅
 ```
 
-#### 3. Preflight Validation
+### Preflight Validation
 **Problem:** Start session, wait for first iteration, then discover build command doesn't exist.
 **Solution:** Optional preflight checks validate setup before iterating.
 
@@ -563,7 +556,7 @@ console.log(session.preflight);
 // If build failed, fix before starting iterations ✅
 ```
 
-#### 4. Cascading Error Detection
+### Cascading Error Detection
 **Problem:** One error causes multiple downstream failures.
 **Solution:** Detect cascading patterns and suggest root cause fix.
 
@@ -637,13 +630,11 @@ if (!result.okBuild) {
 }
 ```
 
-## Phase 3: Advanced Features (25-40% efficiency improvement)
-
-### 1. Quick Undo with `trm.undoLastCandidate`
+### Quick Undo with `trm.undoLastCandidate`
 **Problem:** Failed iterations require manual git commands to revert changes.
 **Solution:** One-command rollback with automatic state restoration.
 
-#### `trm.undoLastCandidate` - **Phase 3 New Tool**
+**Tool: `trm.undoLastCandidate`**
 
 Undo the last candidate submission and restore previous file state, scores, and session state.
 
@@ -698,11 +689,11 @@ const undoResult = await trm.undoLastCandidate({
 }
 ```
 
-### 2. Incremental File Reading with `trm.getFileLines`
+### Incremental File Reading with `trm.getFileLines`
 **Problem:** Reading entire 2000-line files wastes tokens when only needing lines 500-520.
 **Solution:** Range-based reading with line number formatting.
 
-#### `trm.getFileLines` - **Phase 3 New Tool**
+**Tool: `trm.getFileLines`**
 
 Read a specific line range from a file with formatted line numbers.
 
@@ -770,11 +761,11 @@ const context = await trm.getFileLines({
 }
 ```
 
-### 3. Auto-Suggest Fixes with `trm.suggestFix`
+### Auto-Suggest Fixes with `trm.suggestFix`
 **Problem:** Errors provide diagnosis but LLM must manually craft fix candidates.
 **Solution:** AI-powered fix generation with ready-to-apply candidates.
 
-#### `trm.suggestFix` - **Phase 3 New Tool**
+**Tool: `trm.suggestFix`**
 
 Generate actionable fix candidates based on error analysis from the last evaluation.
 
@@ -882,10 +873,10 @@ await trm.validateCandidate({
 }
 ```
 
-### Phase 3 Combined Workflow
+### Combined Workflow Example
 
 ```javascript
-// Start session with all Phase 3 features
+// Start session with advanced features
 const session = await trm.startSession({
   repoPath: "/path/to/project",
   buildCmd: "tsc -p . --noEmit",
@@ -949,19 +940,21 @@ console.log(context.lines);
 // ["135: function parseOutput() {", "136:   ...", ...]
 ```
 
-### Phase 3 Impact Summary
+### Performance Benefits
 
 | Feature | Time Savings | Token Savings | Use Case |
 |---------|-------------|---------------|----------|
 | Quick Undo | 5-10% | - | Instantly recover from failed iterations |
 | Incremental File Reading | 10-15% | 30-50% | Large files, focused edits |
 | Auto-Suggest Fixes | 15-20% | - | TypeScript errors, common patterns |
-| **Combined** | **25-40%** | **30-50%** | **Overall efficiency improvement** |
+| Pre-Apply Validation | 20-30% | - | Catch errors before submission |
+| Error Correlation | 10-15% | - | Faster debugging with context |
+| **Combined Benefits** | **Up to 40%** | **30-50%** | **Overall efficiency improvement** |
 
 **Real-world impact:**
-- **Before Phase 3**: 15-minute iteration session with 10 steps
-- **After Phase 3**: 9-11 minute session (40% faster on error-heavy workloads)
-- **Token usage**: 50% reduction when working with large files
+- Significantly faster iteration sessions on error-heavy workloads
+- Reduced token usage when working with large files
+- Fewer wasted iterations due to validation and error correlation
 
 ## Design Philosophy (TRM → MCP)
 
