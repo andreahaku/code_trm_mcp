@@ -453,7 +453,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           zNotes: p.zNotes || undefined,
           mode: (p as ImprovedStartSessionArgs).mode ?? "cumulative",
           checkpoints: new Map(),
-          baselineCommit
+          baselineCommit,
+          modifiedFiles: new Set(),
+          fileSnapshots: new Map()
         };
         sessions.set(id, state);
         return {
@@ -468,8 +470,34 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           return { content: [{ type: "text", text: `Unknown session: ${p.sessionId}` }] };
         }
 
-        // Apply candidate - handle both legacy and improved modes
+        // Extract files being modified
         const candidate = p.candidate as any;
+        const filesBeingModified: string[] = [];
+        if (candidate.mode === "diff") {
+          filesBeingModified.push(...candidate.changes.map((c: any) => c.path));
+        } else if (candidate.mode === "patch") {
+          const parsed = parseUnifiedDiff(candidate.patch);
+          filesBeingModified.push(...parsed.map(d => d.file));
+        } else if (candidate.mode === "files") {
+          filesBeingModified.push(...candidate.files.map((f: any) => f.path));
+        } else if (candidate.mode === "modify") {
+          filesBeingModified.push(...candidate.changes.map((c: any) => c.file));
+        }
+
+        // Check for stale context warnings
+        const staleContextWarnings: string[] = [];
+        for (const file of filesBeingModified) {
+          if (state.modifiedFiles.has(file)) {
+            // File was modified before - check if context is fresh
+            if (!state.fileSnapshots.has(file)) {
+              staleContextWarnings.push(
+                `⚠️  ${file} was modified in step ${state.step - 1} but context not refreshed. Use trm.getFileContent to avoid patch failures.`
+              );
+            }
+          }
+        }
+
+        // Apply candidate - handle both legacy and improved modes
         if (candidate.mode === "create" || candidate.mode === "modify") {
           const result = await applyImprovedCandidate(state.cfg.repoPath, candidate);
           if (!result.success) {
@@ -477,6 +505,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           }
         } else {
           await applyCandidate(state.cfg.repoPath, p.candidate);
+        }
+
+        // Track modified files and clear their snapshots
+        for (const file of filesBeingModified) {
+          state.modifiedFiles.add(file);
+          state.fileSnapshots.delete(file); // Clear snapshot - it's now stale
         }
         if (typeof p.rationale === "string" && p.rationale.trim().length) {
           // Keep only the latest rationale (TRM z feature)
@@ -516,6 +550,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         }
 
         const feedback: string[] = [];
+        // Add stale context warnings first (high priority)
+        feedback.push(...staleContextWarnings);
+
         if (!build.ok) feedback.push("Build failed – fix compilation/type errors.");
         if (state.cfg.testCmd) {
           if (!testParsed) {
@@ -623,6 +660,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           try {
             const content = await fs.readFile(absPath, "utf8");
             files[relPath] = content;
+            // Cache the snapshot for context staleness detection
+            state.fileSnapshots.set(relPath, content);
           } catch (err: unknown) {
             // If file doesn't exist, note it
             files[relPath] = `[File not found: ${err instanceof Error ? err.message : String(err)}]`;

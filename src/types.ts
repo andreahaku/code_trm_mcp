@@ -112,6 +112,8 @@ export type SessionState = {
   mode: SessionMode;
   checkpoints: Map<string, Checkpoint>;
   baselineCommit?: string;
+  modifiedFiles: Set<string>; // Track files modified in this session for context warnings
+  fileSnapshots: Map<string, string>; // Cache of file contents at last read via getFileContent
 };
 
 // ============= ENHANCED API TYPES =============

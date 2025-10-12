@@ -27,74 +27,148 @@ node dist/server.js
 
 ## Architecture and Code Structure
 
-### Core File: `src/server.ts` (~2,255 lines)
+The codebase has been refactored from a monolithic 2489-line file into **14 focused modules** organized by domain:
 
-The entire MCP server is implemented in a single file with these major sections:
+### Module Organization
 
-#### 1. **Type Definitions (lines 1-285)**
-- Core types: `SessionState`, `EvalResult`, `SessionConfig`
-- **NEW**: Enhanced API types for improved features:
-  - `SessionMode`: `"cumulative"` | `"snapshot"`
-  - `Checkpoint`: State restoration points
-  - `CreateSubmission` / `ModifySubmission`: Simplified submission modes
-  - `EditOperation`: Semantic edit operations (replace, insertBefore, etc.)
-  - `Suggestion`: AI-powered improvement suggestions
-  - `EnhancedError`: Detailed error information with context
-  - `ValidationResult`: Dry-run validation results
+```
+src/
+├── server.ts (701 lines)        # MCP server orchestration
+├── types.ts (196 lines)         # All TypeScript type definitions
+├── constants.ts (14 lines)      # Configuration constants
+├── utils/                       # Core utilities
+│   ├── validation.ts (92)       # Path validation, argument validation, type guards
+│   ├── command.ts (78)          # Command parsing and execution with timeout
+│   ├── scoring.ts (107)         # TRM scoring, halting policy, error hints
+│   └── parser.ts (101)          # Test output and unified diff parsing
+├── patcher/                     # Patch application system
+│   ├── custom-patcher.ts (163)  # Fuzzy-matching patch application
+│   ├── edit-operations.ts (179) # Semantic edit operations
+│   └── candidate.ts (361)       # Candidate application and validation
+├── analyzer/                    # Code quality analysis
+│   ├── code-analyzer.ts (286)   # Static analysis with complexity metrics
+│   └── suggestions.ts (180)     # AI-powered improvement suggestions
+└── state/                       # Session state management
+    ├── checkpoints.ts (73)      # Checkpoint save/restore
+    └── baseline.ts (27)         # Git baseline reset
+```
 
-#### 2. **Helper Functions (lines 286-599)**
-- `validateSafePath()`: Path traversal protection
-- `parseCommand()`: Shell command parsing with quote handling
-- `runCmd()`: Command execution with timeout and error handling
-- `parseTestOutput()`: Extracts test results from Jest/Vitest/Mocha output
-- `scoreFromSignals()`: Computes weighted score from build/test/lint/perf
-- `shouldHalt()`: Implements ACT-like halting policy
-- `diffHints()`: Extracts actionable error messages from command output
+### Module Dependency Graph
 
-#### 3. **Custom Patcher System (lines 600-1000)** ⭐ NEW
+```
+server.ts (orchestration only)
+├── types.ts
+├── constants.ts
+├── utils/
+│   ├── validation.ts
+│   ├── command.ts (uses validation)
+│   ├── scoring.ts (uses validation, types)
+│   └── parser.ts (uses types)
+├── patcher/
+│   ├── custom-patcher.ts (uses parser, validation, types)
+│   ├── edit-operations.ts (uses validation, types)
+│   └── candidate.ts (uses custom-patcher, edit-operations, constants)
+├── analyzer/
+│   ├── code-analyzer.ts (uses types)
+│   └── suggestions.ts (uses code-analyzer, types)
+└── state/
+    ├── checkpoints.ts (uses types)
+    └── baseline.ts (uses types)
+```
+
+**No circular dependencies** - Clean unidirectional flow from server → feature modules → utils → types/constants
+
+## Core Components
+
+### 1. Server Orchestration (`src/server.ts`)
+
+The main MCP server handles:
+- 13 MCP tool definitions with JSON schemas
+- Request routing to appropriate handlers
+- Session management (`Map<SessionId, SessionState>`)
+- MCP protocol communication via stdio
+
+**Does NOT contain implementation logic** - all functionality delegated to modules.
+
+### 2. Custom Patcher System (`src/patcher/`)
+
 Replaces fragile `git apply` with robust fuzzy-matching patcher:
 
-- **`parseUnifiedDiff()`**: Parses unified diff format into structured hunks
-- **`applyHunk()`**: Applies hunks with **fuzzy matching** (80% threshold)
+**`custom-patcher.ts`**:
+- `applyHunk()`: Applies hunks with fuzzy matching (80% threshold)
   - Tries exact match first
   - Falls back to fuzzy search within ±2 lines
   - Returns detailed error with match score if failed
-- **`customPatch()`**: Orchestrates patch application with error collection
-- **`applyEditOperations()`**: Applies semantic operations (replace text, insert/delete lines, etc.)
+- `customPatch()`: Orchestrates patch application with error collection
+
+**`edit-operations.ts`**:
+- Semantic operations: replace, insertBefore, insertAfter, replaceLine, replaceRange, deleteLine, deleteRange
+- Line-based editing with validation
+- Sorted operations to avoid offset issues
+
+**`candidate.ts`**:
+- `applyCandidate()`: Main entry point for legacy modes (diff, patch, files)
+- `applyImprovedCandidate()`: Handles new create/modify modes
+- `validateCandidate()`: Dry-run validation with preview
 
 **Why this matters**: Git apply frequently failed with "corrupt patch" errors. Custom patcher handles whitespace differences and provides actionable error messages.
 
-#### 4. **Code Analysis System (lines 1067-1311)** ⭐ NEW
+### 3. Code Analysis System (`src/analyzer/`)
+
 AI-powered code quality analyzer:
 
-- **`analyzeCodeFile()`**: Static analysis detecting:
-  - `any` type usage
-  - Magic numbers
-  - Missing JSDoc
-  - Long functions (>100 lines)
-  - Missing error handling in async functions
-- **`generateSuggestions()`**: Creates prioritized suggestions combining:
+**`code-analyzer.ts`**:
+- `analyzeCodeFile()`: Basic static analysis (any types, magic numbers, missing JSDoc, long functions, missing error handling)
+- `analyzeCodeFileEnhanced()`: Advanced analysis with:
+  - Cyclomatic complexity calculation
+  - Nesting depth detection
+  - Impure function detection
+  - Hard-to-mock pattern detection
+  - Module size warnings
+
+**`suggestions.ts`**:
+- `generateSuggestions()`: Creates prioritized suggestions combining:
   - Evaluation results (build/test/lint failures)
   - Code quality issues from static analysis
   - Performance regressions (>10% slower)
   - Returns top 5 suggestions sorted by priority (critical → high → medium → low)
 
-#### 5. **Improved Candidate Application (lines 1313-1577)** ⭐ NEW
-- **`applyImprovedCandidate()`**: Handles new create/modify modes
-- **`validateCandidate()`**: Dry-run validation with preview of changes
+### 4. State Management (`src/state/`)
 
-#### 6. **State Management (lines 1579-1671)** ⭐ NEW
-- **`saveCheckpoint()`**: Captures session state for restoration
-- **`restoreCheckpoint()`**: Restores from checkpoint
-- **`resetToBaseline()`**: Resets to initial git commit
-- **`autoCheckpoint()`**: Auto-saves after successful iterations
+Session checkpoint and baseline management:
 
-#### 7. **MCP Server Setup (lines 1672-2255)**
-- Tool definitions with JSON schemas
-- Request handlers for all 13 MCP tools
-- Session management (`Map<SessionId, SessionState>`)
+**`checkpoints.ts`**:
+- `saveCheckpoint()`: Captures session state for restoration
+- `restoreCheckpoint()`: Restores from checkpoint
+- `autoCheckpoint()`: Auto-saves after successful iterations
 
-### MCP Tools Available
+**`baseline.ts`**:
+- `resetToBaseline()`: Resets to initial git commit using git reset --hard
+
+### 5. Core Utilities (`src/utils/`)
+
+**`validation.ts`**:
+- `validateSafePath()`: Path traversal protection
+- `validateStartSessionArgs()`: Comprehensive argument validation
+- `isExecaError()`: Type guard for execa errors
+- `clamp01()`: Math utility for [0,1] range
+
+**`command.ts`**:
+- `parseCommand()`: Shell command parsing with quote handling
+- `runCmd()`: Command execution with timeout and error handling
+
+**`scoring.ts`**:
+- `scoreFromSignals()`: Computes weighted score from build/test/lint/perf (with EMA tracking side effect)
+- `shouldHalt()`: Implements ACT-like halting policy
+- `diffHints()`: Extracts actionable error messages from command output
+
+**`parser.ts`**:
+- `parseTestOutput()`: Extracts test results from Jest/Vitest/Mocha output (JSON or text)
+- `parseUnifiedDiff()`: Parses unified diff into structured hunks
+
+## MCP Tools Available
+
+The server exposes 13 MCP tools:
 
 **Original 6 tools:**
 1. `trm.startSession` - Initialize with repo path, commands, weights, halt policy
@@ -104,41 +178,44 @@ AI-powered code quality analyzer:
 5. `trm.shouldHalt` - Check halting decision
 6. `trm.endSession` - Clean up session
 
-**New 7 tools** (from recent improvements):
+**Enhanced 7 tools:**
 7. `trm.validateCandidate` - Dry-run validation without applying
 8. `trm.getSuggestions` - Get AI-powered improvement suggestions
 9. `trm.saveCheckpoint` - Save current state
 10. `trm.restoreCheckpoint` - Restore from checkpoint
 11. `trm.listCheckpoints` - List all checkpoints
 12. `trm.resetToBaseline` - Reset to initial state
+13. `trm.getFileContent` - Read file contents (supports pagination for large files)
 
-### Submission Modes
+## Submission Modes
 
 **Legacy modes** (still supported):
-- `diff`: Per-file unified diffs (now uses custom patcher instead of git apply)
+- `diff`: Per-file unified diffs (uses custom patcher)
 - `patch`: Single unified diff for multiple files (custom patcher)
 - `files`: Complete file contents (for new files or rewrites)
 
 **New modes** (recommended):
 - `create`: For new files only (validates file doesn't exist)
-- `modify`: For existing files with semantic operations:
-  ```typescript
-  {
-    mode: "modify",
-    changes: [{
-      file: "src/server.ts",
-      edits: [
-        { type: "replace", oldText: "err: any", newText: "err: unknown", all: true },
-        { type: "insertAfter", line: 150, content: "const NEW_CONSTANT = 42;" },
-        { type: "replaceLine", line: 200, content: "// Updated comment" }
-      ]
-    }]
-  }
-  ```
+- `modify`: For existing files with semantic edit operations
 
-### Session State Management
+Example modify mode:
+```typescript
+{
+  mode: "modify",
+  changes: [{
+    file: "src/server.ts",
+    edits: [
+      { type: "replace", oldText: "err: any", newText: "err: unknown", all: true },
+      { type: "insertAfter", line: 150, content: "const NEW_CONSTANT = 42;" },
+      { type: "replaceLine", line: 200, content: "// Updated comment" }
+    ]
+  }]
+}
+```
 
-Sessions now support two modes:
+## Session State Management
+
+Sessions support two modes:
 
 - **`cumulative`** (default): Each iteration builds on the previous state
 - **`snapshot`**: Can reset to checkpoints or baseline between iterations
@@ -154,29 +231,21 @@ Set via `mode` parameter in `trm.startSession`:
 
 ## Key Design Patterns
 
-### 1. **Stateful Sessions**
-Each session maintains:
-- Current step number and scores (current, EMA, best)
-- Improvement streak tracking
-- Complete evaluation history
-- Checkpoint system (new)
-- Baseline git commit reference (new)
-
-### 2. **Weighted Scoring System**
+### Weighted Scoring System
 ```
 score = (w.build * sBuild + w.test * sTests + w.lint * sLint + w.perf * sPerf) / sumWeights
 
 where each signal ∈ [0, 1]
 ```
 
-### 3. **Fuzzy Patch Application**
+### Fuzzy Patch Application
 Unlike git apply, the custom patcher:
 - Searches ±2 lines for best match
 - Requires 80% line match threshold
 - Provides detailed error context (expected vs got, match score)
 - Handles whitespace variations gracefully
 
-### 4. **Error Handling Philosophy**
+### Error Handling Philosophy
 All errors use `EnhancedError` type with:
 - `error`: Human-readable message
 - `code`: Machine-readable error code
@@ -185,6 +254,24 @@ All errors use `EnhancedError` type with:
 - `details.expected` / `details.got`: Comparison context
 - `details.suggestion`: Actionable fix recommendation
 - `details.context`: Additional debugging info
+
+## Important Constants
+
+Defined in `src/constants.ts`:
+- `MAX_FILE_SIZE`: 10MB per file
+- `MAX_CANDIDATE_FILES`: 100 files per submission
+- `MAX_RATIONALE_LENGTH`: 4000 characters
+- `SCORE_IMPROVEMENT_EPSILON`: 1e-6 (minimum improvement to reset streak)
+- `MAX_HINT_LINES`: 12 error hint lines in feedback
+- `MAX_FEEDBACK_ITEMS`: 16 total feedback items
+- `MAX_FILE_READ_PATHS`: 50 files in single getFileContent request
+
+## Security Notes
+
+- **Path traversal protection**: `validateSafePath()` ensures all file operations stay within repository bounds
+- **Command injection protection**: `parseCommand()` respects quotes, `execa` uses array args (no shell by default)
+- **Size limits**: Enforced on file sizes, candidate file counts, and rationale length
+- **Timeout enforcement**: All commands have configurable timeouts (default 120s)
 
 ## Testing This Server
 
@@ -220,38 +307,6 @@ await trm.submitCandidate({
 await trm.getSuggestions({ sessionId: "..." });
 ```
 
-## Important Constants
-
-Defined in `src/server.ts`:
-- `MAX_FILE_SIZE`: 10MB per file
-- `MAX_CANDIDATE_FILES`: 100 files per submission
-- `MAX_RATIONALE_LENGTH`: 4000 characters
-- `SCORE_IMPROVEMENT_EPSILON`: 1e-6 (minimum improvement to reset streak)
-- `MAX_HINT_LINES`: 12 error hint lines in feedback
-- `MAX_FEEDBACK_ITEMS`: 16 total feedback items
-- `MAX_FILE_READ_PATHS`: 50 files in single getFileContent request
-
-## Security Notes
-
-- **Path traversal protection**: `validateSafePath()` ensures all file operations stay within repository bounds
-- **Command injection protection**: `parseCommand()` respects quotes, `execa` uses array args (no shell by default)
-- **Size limits**: Enforced on file sizes, candidate file counts, and rationale length
-- **Timeout enforcement**: All commands have configurable timeouts (default 120s)
-
-## Recent Major Changes
-
-**Latest commit (6ebc1b4)** added comprehensive improvements:
-- Custom patcher system replacing git apply
-- State management with checkpoints
-- Simplified create/modify submission modes
-- Code analyzer with AI-powered suggestions
-- Validation/dry-run tool
-- Enhanced error messages with detailed context
-- 13 new TypeScript types
-- 6 new MCP tools
-
-These changes address all pain points from practical usage: git apply failures, unclear state management, and lack of actionable feedback.
-
 ## Philosophy: TRM → MCP Adaptation
 
 This server adapts the TRM (Test-time Recursive Memory) research into a practical MCP tool:
@@ -262,3 +317,16 @@ This server adapts the TRM (Test-time Recursive Memory) research into a practica
 - **ACT halting**: Clear stopping rules (tests pass + threshold, plateau, max steps)
 - **Small patches**: Maximize information per step (TRM principle)
 - **No training needed**: Pure test-time refinement using existing dev tools
+
+## Modular Architecture Benefits
+
+The refactoring from monolithic (2489 lines) to modular (14 modules, 701-line orchestrator) provides:
+
+- **Improved maintainability**: Each module has single responsibility
+- **Better testability**: Modules can be tested independently
+- **Reduced complexity**: Average module size ~150 lines vs 2489-line monolith
+- **Enhanced reusability**: Functions imported only where needed
+- **Easier collaboration**: Multiple developers can work on different modules
+- **Clear dependency graph**: No circular dependencies, unidirectional flow
+
+See `REFACTORING.md` for complete refactoring details and module structure.
