@@ -5,7 +5,7 @@
 
 import fs from "fs-extra";
 import path from "path";
-import type { EnhancedError, ParsedDiffFile } from "../types.js";
+import type { EnhancedError, ParsedDiffFile, ParsedDiffHunk } from "../types.js";
 import { validateSafePath } from "../utils/validation.js";
 import { parseUnifiedDiff } from "../utils/parser.js";
 
@@ -54,15 +54,31 @@ function lineSimilarity(line1: string, line2: string): number {
  */
 export function applyHunk(
   fileLines: string[],
-  hunk: any,
+  hunk: ParsedDiffHunk,
   fuzzyThreshold = DEFAULT_FUZZY_THRESHOLD
 ): { success: boolean; newLines: string[]; error?: EnhancedError } {
   const { oldStart, lines } = hunk;
 
   // Extract old content from hunk
   const expectedOldLines = lines
-    .filter((l: any) => l.type === "context" || l.type === "remove")
-    .map((l: any) => l.content);
+    .filter((l) => l.type === "context" || l.type === "remove")
+    .map((l) => l.content);
+
+  // Validate fuzzy threshold parameter
+  if (fuzzyThreshold < 0 || fuzzyThreshold > 100) {
+    return {
+      success: false,
+      newLines: fileLines,
+      error: {
+        error: "Invalid fuzzy threshold",
+        code: "INVALID_PARAMETER",
+        details: {
+          reason: `Fuzzy threshold must be between 0 and 100, got ${fuzzyThreshold}`,
+          suggestion: "Use a reasonable threshold value (typically 2-10)"
+        }
+      }
+    };
+  }
 
   // Try exact match first (with normalization)
   let matchIndex = oldStart - 1; // Convert 1-based to 0-based
