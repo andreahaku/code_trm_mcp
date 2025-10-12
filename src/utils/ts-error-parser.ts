@@ -85,6 +85,31 @@ function generateSuggestion(code: string, message: string): string | undefined {
     return `Add explicit type annotation to avoid implicit 'any'. Use a specific type or 'unknown' for better type safety.`;
   }
 
+  // TS2532: Object is possibly 'undefined'
+  if (code === "TS2532") {
+    return `Add null/undefined check before accessing. Use optional chaining (?.) or nullish coalescing (??) operator.`;
+  }
+
+  // TS2488: Type must have a Symbol.iterator
+  if (code === "TS2488") {
+    return `This type is not iterable. Check if it's an array or implement the iterator protocol.`;
+  }
+
+  // TS2531: Object is possibly 'null'
+  if (code === "TS2531") {
+    return `Add null check before accessing. Use optional chaining (?.) or check for null explicitly.`;
+  }
+
+  // TS2556: Expected N arguments, but got M
+  if (code === "TS2556") {
+    return `Function call has wrong number of arguments. Check the function signature and provide all required parameters.`;
+  }
+
+  // TS2769: No overload matches this call
+  if (code === "TS2769") {
+    return `None of the function overloads match this call. Check parameter types and counts against all available overloads.`;
+  }
+
   return undefined;
 }
 

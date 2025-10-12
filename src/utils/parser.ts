@@ -4,6 +4,16 @@
 
 import type { ParsedDiffFile, ParsedDiffHunk } from "../types.js";
 
+
+/**
+ * Extract error count from test output when full parsing fails.
+ */
+function extractErrorCount(raw: string): number {
+  // Look for common error indicators
+  const failMatch = raw.match(/(\d+)\s*(?:failing|failed|error)/i);
+  if (failMatch) return parseInt(failMatch[1], 10);
+  return 0;
+}
 /**
  * Parse test framework output (Jest, Vitest, Mocha) to extract pass/fail counts.
  * Supports both JSON reporters and text summary formats.

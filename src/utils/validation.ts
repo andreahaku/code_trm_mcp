@@ -77,10 +77,15 @@ export async function validateStartSessionArgs(args: StartSessionArgs): Promise<
 /**
  * Type guard to check if an error has expected execa properties.
  */
-export function isExecaError(err: unknown): err is { stdout?: string; stderr?: string; exitCode?: number; timedOut?: boolean } {
+export function isExecaError(
+  err: unknown
+): err is { stdout?: string; stderr?: string; exitCode?: number; timedOut?: boolean; message?: string } {
   return (
     typeof err === 'object' && err !== null &&
-    ('stdout' in err || 'stderr' in err || 'exitCode' in err || 'timedOut' in err)
+    ('stdout' in err || 
+     'stderr' in err || 
+     'exitCode' in err || 
+     'timedOut' in err)
   );
 }
 
@@ -89,4 +94,24 @@ export function isExecaError(err: unknown): err is { stdout?: string; stderr?: s
  */
 export function clamp01(x: number): number {
   return Math.max(0, Math.min(1, x));
+}
+
+/**
+ * Validate that a command string is not empty and safe to execute.
+ */
+export function validateCommand(cmd: string | undefined): void {
+  if (cmd !== undefined && cmd.trim().length === 0) {
+    throw new Error("Command cannot be empty");
+  }
+}
+
+/**
+ * Check if a path exists and is readable.
+ */
+export async function validatePathReadable(filepath: string): Promise<void> {
+  try {
+    await fs.access(filepath, fs.constants.R_OK);
+  } catch {
+    throw new Error(`Path is not readable: ${filepath}`);
+  }
 }

@@ -7,6 +7,15 @@ import type { CommandResult } from "../types.js";
 import { isExecaError } from "./validation.js";
 
 /**
+ * Sanitize command output by removing ANSI color codes and control characters.
+ */
+export function sanitizeOutput(output: string): string {
+  // Remove ANSI escape codes
+  return output.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r/g, '');
+}
+
+
+/**
  * Parse a command string into program and arguments, respecting quotes.
  * Example: 'npm test --silent -- --reporter="json"' -> ['npm', 'test', '--silent', '--', '--reporter=json']
  */
