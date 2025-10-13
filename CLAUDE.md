@@ -1,183 +1,250 @@
 # CLAUDE.md
 
-## Project Overview
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**MCP server** implementing TRM (Test-time Recursive Memory) for LLM-driven code refinement. The LLM proposes changes, this server evaluates them with build/test/lint/bench commands and provides scored feedback.
-
-## Build Commands
+## Build, Lint, and Test Commands
 
 ```bash
-npm run build      # Build TypeScript
-npm run dev        # Watch mode
-npm start          # Run server
+# Build the project (compile TypeScript)
+npm run build
+
+# Start the MCP server
+npm start
+
+# Development mode (watch for changes)
+npm run dev
 ```
 
-**Important**: ES modules with NodeNext resolution. All imports must use `.js` extensions (even for `.ts` files).
+**Note**: This project does not have lint or test commands configured. When adding tests, use `--silent` and `--reporter=json` flags for compatibility with TRM evaluation.
 
-## Architecture
+## Architecture Overview
+
+This is an **MCP (Model Context Protocol) server** implementing TRM-inspired (Test-time Recursive Memory) recursive code refinement for LLM development tools.
+
+### Core Concept
+
+- **LLM Client** (Claude Code/Cursor/Codex): Acts as the **optimizer** proposing code changes
+- **MCP TRM Server**: Acts as the **critic/evaluator** with stateful session tracking
+- **Feedback Loop**: Build/test/lint/bench → weighted score → EMA tracking → halting policy
+
+### Key Directories
 
 ```
 src/
-├── server.ts                 # MCP server orchestration (15 tools)
-├── types.ts                  # TypeScript types
-├── constants.ts              # Configuration constants
+├── server.ts                    # MCP server entry point (ultra-optimized)
+├── types.ts                     # Core type definitions
+├── constants.ts                 # Configuration constants
+├── tools/
+│   ├── schemas.ultra.ts         # Ultra-optimized tool schemas (~30% token reduction)
+│   ├── param-translator.ts      # Short→full parameter name translation
+│   └── handlers/                # Tool implementation handlers
+│       ├── index.ultra.ts       # Handler registry (ultra-optimized)
+│       ├── session.ts           # Session lifecycle (start/end)
+│       ├── candidate.ts         # Candidate submission/validation/undo
+│       ├── file.ts              # File operations (read/lines)
+│       ├── state.ts             # State queries (state/halt/suggestions)
+│       ├── checkpoint.ts        # Checkpoint management
+│       ├── baseline.ts          # Baseline reset
+│       ├── fix.ts               # AI-powered fix suggestions
+│       └── lib/                 # Shared handler utilities
+│           ├── evaluation.ts    # Evaluation pipeline
+│           ├── feedback.ts      # Feedback generation
+│           ├── file-management.ts # File snapshot/restore
+│           ├── response-utils.ts  # Response formatting
+│           └── runtime-validation.ts # Parameter validation
+├── patcher/
+│   ├── candidate.ts             # Candidate application logic
+│   ├── custom-patcher.ts        # Fuzzy diff/patch matching
+│   └── edit-operations.ts       # Semantic edit operations
+├── analyzer/
+│   ├── code-analyzer.ts         # Code quality analysis
+│   └── suggestions.ts           # AI suggestion generation
+├── state/
+│   ├── baseline.ts              # Git baseline management
+│   └── checkpoints.ts           # Checkpoint utilities
 ├── shared/
-│   └── sessions.ts           # Shared session state map
-├── tools/handlers/           # Tool implementation handlers
-│   ├── index.ts              # Handler registry and routing
-│   ├── session.ts            # Session lifecycle (start/end)
-│   ├── candidate.ts          # Submit/validate/undo candidates
-│   ├── file.ts               # File operations
-│   ├── state.ts              # State queries
-│   ├── checkpoint.ts         # Checkpoint management
-│   ├── baseline.ts           # Git baseline reset
-│   ├── fix.ts                # Fix suggestions
-│   └── lib/                  # Handler utilities
-│       ├── evaluation.ts     # Run build/test/lint/bench
-│       ├── feedback.ts       # Generate feedback with error correlation
-│       ├── file-management.ts # File snapshots and tracking
-│       ├── runtime-validation.ts # Type-safe argument validation
-│       └── response-utils.ts # Standardized responses
-├── utils/                    # Core utilities
-│   ├── validation.ts         # Path validation, type guards
-│   ├── command.ts            # Command execution
-│   ├── scoring.ts            # TRM scoring and halting
-│   ├── parser.ts             # Test output and diff parsing
-│   ├── ts-error-parser.ts    # TypeScript error parsing
-│   ├── mode-suggestion.ts    # Mode recommendations
-│   ├── error-context.ts      # Error correlation
-│   └── fix-generator.ts      # AI fix generation
-├── patcher/                  # Patch application
-│   ├── custom-patcher.ts     # Fuzzy-matching patcher
-│   ├── edit-operations.ts    # Semantic edit operations
-│   └── candidate.ts          # Apply/validate candidates
-├── analyzer/                 # Code quality analysis
-│   ├── code-analyzer.ts      # Static analysis
-│   └── suggestions.ts        # AI suggestions
-└── state/                    # Session management
-    ├── checkpoints.ts        # Save/restore
-    └── baseline.ts           # Git reset
+│   └── sessions.ts              # Global session storage (Map<SessionId, SessionState>)
+└── utils/
+    ├── command.ts               # Shell command execution
+    ├── scoring.ts               # Score calculation (weighted average)
+    ├── parser.ts                # Test output parsing (Jest/Vitest)
+    ├── ts-error-parser.ts       # TypeScript error extraction
+    ├── error-context.ts         # Error correlation
+    ├── fix-generator.ts         # Auto-fix generation
+    ├── mode-suggestion.ts       # Submission mode suggestions
+    └── validation.ts            # Path safety validation
 ```
 
-**No circular dependencies** - Clean flow: server → handlers → utils → types/constants
+### Modular Handler Architecture
 
-## Handler Architecture
+**Key refactoring (74a2f30)**: Split monolithic `server.ts` into modular handlers.
 
-**Pattern**: Handler registry (`index.ts`) routes requests to domain-specific handlers. Each handler uses utility modules from `lib/` for common operations.
+**Handler Pattern**:
+- Each handler in `tools/handlers/` is a pure function: `(args) => Promise<ToolResponse>`
+- Handlers access global `sessions` Map from `shared/sessions.ts`
+- Handler utilities in `tools/handlers/lib/` provide shared evaluation/feedback/file logic
+- `index.ultra.ts` routes tool calls via `handleToolCall(req)` with parameter translation
 
-**Handler utilities** (`src/tools/handlers/lib/`):
-- `evaluation.ts`: Run evaluation commands, compute scores
-- `feedback.ts`: Generate feedback with TypeScript error parsing and suggestions
-- `file-management.ts`: Extract files, create snapshots for undo
-- `runtime-validation.ts`: Type-safe argument validation
-- `response-utils.ts`: Standardized response formats (success/error)
+**Why this matters**:
+- Handlers are independently testable
+- Complexity reduced from ~900 lines to <100 lines per handler
+- Easy to add new tools without touching core server logic
 
-**Key refactoring**: candidate.ts reduced from 401 lines (complexity 73) to 247 lines (complexity 30) by extracting utilities.
+### Session State Management
 
-## MCP Tools (15 total - Ultra-Optimized)
+**Global Storage**: `sessions` Map in `shared/sessions.ts`
+- Key: `SessionId` (string)
+- Value: `SessionState` object
 
-**Note**: Tool names are shortened for token efficiency. Parameter names also shortened (sid vs sessionId, repo vs repoPath, etc). See `docs/MIGRATION_COMPLETE.md` for full mapping.
-
-**Core (6)**:
-1. `trm.start` - Initialize session (was startSession)
-2. `trm.submit` - Apply changes and evaluate (was submitCandidate)
-3. `trm.read` - Read files with metadata (was getFileContent)
-4. `trm.state` - Get session state (was getState)
-5. `trm.halt` - Check halting decision (was shouldHalt)
-6. `trm.end` - Cleanup (was endSession)
-
-**Enhancement (6)**:
-7. `trm.validate` - Dry-run validation (was validateCandidate)
-8. `trm.suggest` - AI suggestions (was getSuggestions)
-9. `trm.save` - Save state (was saveCheckpoint)
-10. `trm.restore` - Restore state (was restoreCheckpoint)
-11. `trm.list` - List checkpoints (was listCheckpoints)
-12. `trm.reset` - Git reset (was resetToBaseline)
-
-**Advanced (3)**:
-13. `trm.undo` - Quick undo (was undoLastCandidate)
-14. `trm.lines` - Read line ranges (was getFileLines)
-15. `trm.fix` - AI fix generation (was suggestFix)
-
-**Token savings**: 660 tokens (28%) via shortened names + compressed descriptions
-
-## Submission Modes
-
-**Recommended (new)**:
-- `create`: New files only
-- `modify`: Semantic edit operations (replace, insertBefore, insertAfter, replaceLine, etc.)
-
-**Legacy (still supported)**:
-- `diff`: Per-file unified diffs
-- `patch`: Single unified diff
-- `files`: Complete file contents
-
-**Example modify mode**:
+**SessionState Structure** (types.ts:174-199):
 ```typescript
 {
-  mode: "modify",
-  changes: [{
-    file: "src/server.ts",
-    edits: [
-      { type: "replace", oldText: "err: any", newText: "err: unknown", all: true },
-      { type: "insertAfter", line: 150, content: "const NEW_CONSTANT = 42;" }
-    ]
-  }]
+  id: SessionId;
+  cfg: SessionConfig;              // Commands, weights, halt policy
+  step: number;                    // Current iteration
+  bestScore: number;               // Best score achieved
+  emaScore: number;                // Exponential moving average
+  emaAlpha: number;                // EMA smoothing factor
+  noImproveStreak: number;         // Consecutive steps without improvement
+  history: EvalResult[];           // Past evaluation results
+  zNotes?: string;                 // Latent reasoning notes
+  bestPerf?: number;               // Best performance value
+  mode: SessionMode;               // "cumulative" | "snapshot"
+  checkpoints: Map<string, Checkpoint>;
+  baselineCommit?: string;         // Git commit for reset
+  modifiedFiles: Set<string>;      // Track changes for error correlation
+  fileSnapshots: Map<string, string>; // File content cache
+  commandStatus: {...};            // Command availability
+  iterationContexts: IterationContext[]; // For error correlation
+  candidateSnapshots: CandidateSnapshot[]; // For undo functionality
 }
 ```
 
-## Key Patterns
+### Evaluation Pipeline
 
-**Weighted scoring**:
-```
-score = (w.build * sBuild + w.test * sTests + w.lint * sLint + w.perf * sPerf) / sumWeights
-where each signal ∈ [0, 1]
-```
+Located in `tools/handlers/lib/evaluation.ts`.
 
-**Fuzzy patcher**: Unlike git apply, handles whitespace variations, searches ±2 lines for matches, requires 80% line match threshold.
+**Flow** (on `trm.submitCandidate`):
+1. **Apply candidate** via `patcher/candidate.ts` (validate → apply)
+2. **Run commands** sequentially: build → test → lint → bench
+3. **Parse outputs** (extract pass/fail, test counts, perf metrics)
+4. **Compute score** using weighted average (scoring.ts):
+   ```
+   score = (w.build * sBuild + w.test * sTests + w.lint * sLint + w.perf * sPerf) / sumWeights
+   ```
+5. **Update EMA**: `emaScore = alpha * score + (1 - alpha) * prevEmaScore`
+6. **Check improvement streak**: Reset or increment `noImproveStreak`
+7. **Generate feedback** (feedback.ts): TypeScript errors, test failures, mode suggestions
+8. **Check halting policy**: Pass threshold, patience exhausted, max steps
+9. **Return EvalResult**: `{ step, score, emaScore, feedback, shouldHalt, ... }`
 
-**Error handling**: All errors include actionable context (expected vs got, suggestions, location).
+### Candidate Submission Modes
+
+**Recommended** (new, semantic):
+- `create`: New files only (validates non-existence)
+- `modify`: Semantic edit operations (replace, insertBefore, insertAfter, replaceLine, deleteRange, etc.)
+
+**Legacy** (still supported):
+- `diff`: Per-file unified diffs with custom fuzzy patcher
+- `patch`: Single unified diff for multiple files
+- `files`: Complete file contents (inefficient for large files)
+
+**Validation**: Pre-apply validation checks:
+- Line numbers within file bounds
+- No duplicate function/class declarations near insertion points
+- Path safety (prevent traversal)
+- File size limits (10MB per file, 50 files max)
+
+See `patcher/candidate.ts:28-120` for validation logic.
+
+### Error Correlation
+
+**Feature**: Track which iteration introduced each error.
+
+**Implementation** (utils/error-context.ts):
+- Store `iterationContexts` per session (step, filesModified, mode, success)
+- On TypeScript errors: correlate error locations with past iterations
+- Feedback includes: "Error at file.ts:50 introduced in step 3 (modified server.ts)"
+
+**Benefit**: Helps LLM identify which change caused the error.
+
+### Token Optimization Strategy
+
+**Ultra-optimized schemas** (schemas.ultra.ts):
+- Tool names shortened: `trm.submitCandidate` → `trm.submit`
+- Property names shortened: `sessionId` → `sid`, `repoPath` → `repo`
+- Descriptions compressed
+- **Result**: ~30% token reduction vs original schemas
+
+**Parameter Translation** (param-translator.ts):
+- Maps short names back to full internal names
+- Preserves backward compatibility
+- Transparent to handlers
+
+**Why**: MCP protocol overhead is ~7,200 tokens. Every token saved = more code context.
+
+## TypeScript Configuration
+
+- **Target**: ES2022
+- **Module**: NodeNext (ESM)
+- **Strict mode**: Enabled
+- **Output**: `dist/` directory
+- **Source maps**: Enabled for debugging
+
+## Development Workflow
+
+### Adding a New Tool
+
+1. **Define schema** in `src/tools/schemas.ultra.ts`
+   - Use short property names for token efficiency
+   - Add to `tools` array
+2. **Create handler** in `src/tools/handlers/`
+   - Pure function: `(args) => Promise<ToolResponse>`
+   - Access `sessions` from `shared/sessions.ts`
+   - Use utilities from `lib/` for common tasks
+3. **Register in router** at `src/tools/handlers/index.ultra.ts`
+   - Add case to switch statement
+   - Tool name must match schema
+4. **Add translation mapping** in `src/tools/param-translator.ts` (if using short property names)
+5. **Update types** in `src/types.ts` if needed
+
+### Modifying Evaluation Logic
+
+- **Score calculation**: `src/utils/scoring.ts`
+- **Command execution**: `src/utils/command.ts`
+- **Test parsing**: `src/utils/parser.ts`
+- **Feedback generation**: `src/tools/handlers/lib/feedback.ts`
+
+### Working with Candidate Modes
+
+- **Diff/patch application**: `src/patcher/custom-patcher.ts` (fuzzy matching logic)
+- **Edit operations**: `src/patcher/edit-operations.ts` (semantic edits)
+- **Validation**: `src/patcher/candidate.ts:28-120` (pre-apply checks)
 
 ## Important Constants
 
-`src/constants.ts`:
-- `MAX_FILE_SIZE`: 10MB
-- `MAX_CANDIDATE_FILES`: 100
-- `MAX_RATIONALE_LENGTH`: 4000 chars
-- `SCORE_IMPROVEMENT_EPSILON`: 1e-6
-- `MAX_HINT_LINES`: 12
-- `MAX_FEEDBACK_ITEMS`: 16
-- `MAX_FILE_READ_PATHS`: 50
+Located in `src/constants.ts`:
+```typescript
+MAX_FILE_SIZE = 10MB      // Per-file size limit
+MAX_CANDIDATE_FILES = 50  // Max files per submission
+```
 
-## Security
+## Recent Refactoring History
 
-- Path traversal protection: `validateSafePath()`
-- Command injection protection: `execa` with array args
-- Size limits enforced on all inputs
-- Configurable timeouts (default 120s)
+- **9a42031**: Optimized MCP tool schemas (4% token reduction, 384 tokens saved)
+- **c46bb8a**: Extracted handler utilities to reduce complexity
+- **74a2f30**: Split monolithic server.ts into modular handler architecture
+- **fb56867**: Removed internal phase terminology from docs
 
-## TRM Principles
+## Testing Strategy
 
-- **y (state)**: Repository files after each patch
-- **z (reasoning)**: `rationale` and `zNotes` maintain context
-- **Deep supervision**: Objective signals (build/test/lint/bench)
-- **ACT halting**: Stop when tests pass + threshold, plateau, or max steps
-- **Small patches**: Maximize information per step
-- **No training**: Pure test-time refinement
+When adding tests:
+- Use Jest or Vitest with `--silent` and `--reporter=json` flags
+- JSON output enables accurate test score calculation
+- Example test command: `npm test --silent -- --reporter=json`
 
-## Token Optimization
+## Security Notes
 
-**Active**: Ultra-optimized schema (28% reduction, 660 tokens saved)
-- Shortened tool names (`trm.submit` vs `trm.submitCandidate`)
-- Shortened property names (`sid` vs `sessionId`)
-- Translation layer: `param-translator.ts` maps short→original for handlers
-
-See `docs/MIGRATION_COMPLETE.md` for details, `docs/ULTRA_OPTIMIZATION.md` for full guide.
-
-## Documentation
-
-- `TRM_IMPROVEMENTS.md`: Phase 1-3 enhancements with examples
-- `REFACTORING.md`: Server and handler refactoring details
-- `README.md`: User-facing documentation
-- `docs/MIGRATION_COMPLETE.md`: Ultra optimization details
-- `docs/ULTRA_OPTIMIZATION.md`: Complete optimization guide
+- Path validation: All file paths validated via `validateSafePath()` to prevent traversal
+- Command timeouts: Configurable timeout (default 120s) prevents runaway processes
+- File size limits: Prevents memory exhaustion from large submissions
