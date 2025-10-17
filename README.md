@@ -52,7 +52,7 @@ npm run build
 }
 ```
 
-## Available Tools (15 Total)
+## Available Tools (16 Total)
 
 ### Core Tools
 
@@ -222,6 +222,72 @@ await trm.submitCandidate({
 });
 ```
 
+#### `trm.reviewPR`
+
+Perform detailed code review on pull requests from GitHub URLs or direct diffs.
+
+**Parameters:**
+- `prUrl`: GitHub PR URL (e.g., `https://github.com/owner/repo/pull/123`)
+- `diff`: Direct unified diff content
+- `files`: Array of files with `path`, `content`, and optional `originalContent`
+- `focus`: Optional array to filter review categories
+
+**Focus categories:**
+- `type-safety`: Detect usage of `any` type
+- `logging`: Flag console statements
+- `todos`: Identify TODO/FIXME comments
+- `code-quality`: Magic numbers, long lines
+- `formatting`: Line length validation (>120 chars)
+- `error-handling`: Missing try-catch in async functions
+- `testing`: Suggest adding tests
+- `size`: Flag large changesets
+
+**Returns:**
+```javascript
+{
+  summary: {
+    filesChanged: number,
+    linesAdded: number,
+    linesRemoved: number,
+    commentsCount: number,
+    criticalCount: number,
+    warningCount: number,
+    infoCount: number,
+    assessment: "approved" | "needs-changes" | "comments",
+    highlights: string[]
+  },
+  comments: [{
+    file: string,
+    line: number,
+    severity: "error" | "warning" | "info",
+    category: string,
+    message: string,
+    suggestion?: string
+  }],
+  issues: string[],
+  suggestions: string[],
+  prInfo?: { title?: string, url?: string }
+}
+```
+
+**Example:**
+```javascript
+// Review from GitHub URL
+const review = await trm.reviewPR({
+  prUrl: "https://github.com/owner/repo/pull/123",
+  focus: ["type-safety", "error-handling", "code-quality"]
+});
+
+console.log(`Assessment: ${review.summary.assessment}`);
+console.log(`Found ${review.comments.length} comments`);
+
+// Review from direct diff
+const review2 = await trm.reviewPR({
+  diff: "diff --git a/file.ts...",
+  focus: ["logging", "todos"]
+});
+```
+
 ## Recommended Workflow
 
 ### 1. Start Session with Preflight
@@ -366,7 +432,7 @@ The MCP tool schemas have been optimized to minimize token usage while preservin
 
 **Optimization results:**
 - **4% reduction** in total MCP token usage (384 tokens saved)
-- **15 tools** optimized from 9,618 tokens to 9,234 tokens
+- **16 tools** optimized from 9,618 tokens to 9,234 tokens
 - **No functionality loss** - all parameters, types, and features unchanged
 
 **What was optimized:**
