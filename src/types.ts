@@ -331,3 +331,41 @@ export type ParsedDiffHunk = {
   newLines: number;
   lines: Array<{ type: "context" | "add" | "remove"; content: string }>;
 };
+
+// ============= PR REVIEW TYPES =============
+
+export type PRReviewArgs = {
+  prUrl?: string;
+  diff?: string;
+  files?: Array<{ path: string; content: string; originalContent?: string }>;
+  focus?: string[];
+};
+
+export type ReviewComment = {
+  file: string;
+  line: number;
+  severity: "error" | "warning" | "info";
+  category: "type-safety" | "logging" | "todos" | "code-quality" | "formatting" | "error-handling" | "testing" | "size";
+  message: string;
+  suggestion?: string;
+};
+
+export type ReviewSummary = {
+  filesChanged: number;
+  linesAdded: number;
+  linesRemoved: number;
+  commentsCount: number;
+  criticalCount: number;
+  warningCount: number;
+  infoCount: number;
+  assessment: "approved" | "needs-changes" | "comments";
+  highlights: string[];
+};
+
+export type PRReviewResponse = {
+  summary: ReviewSummary;
+  comments: ReviewComment[];
+  issues: string[];
+  suggestions: string[];
+  prInfo?: { title?: string; url?: string };
+};

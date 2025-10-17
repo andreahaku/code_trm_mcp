@@ -7,6 +7,7 @@ import { handleGetState, handleShouldHalt, handleGetSuggestions } from "./state.
 import { handleSaveCheckpoint, handleRestoreCheckpoint, handleListCheckpoints } from "./checkpoint.js";
 import { handleResetToBaseline } from "./baseline.js";
 import { handleSuggestFix } from "./fix.js";
+import { handleReviewPR } from "./pr-review.js";
 
 /**
  * Handler registry for ultra-optimized schema (short tool names).
@@ -61,6 +62,10 @@ export async function handleToolCall(req: CallToolRequest) {
       // AI-powered fixes
       case "trm.fix":
         return await handleSuggestFix(translatedArgs);
+
+      // PR review
+      case "trm.review":
+        return await handleReviewPR(translatedArgs);
 
       default:
         return { content: [{ type: "text", text: `Unhandled tool: ${req.params.name}` }] };

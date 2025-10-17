@@ -29,7 +29,11 @@ const PROP_MAP: Record<string, string> = {
 
   // File lines
   start: "startLine",
-  end: "endLine"
+  end: "endLine",
+
+  // PR Review
+  url: "prUrl",
+  orig: "originalContent"
 };
 
 /**

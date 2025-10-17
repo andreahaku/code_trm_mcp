@@ -279,5 +279,32 @@ export const tools: Tool[] = [
       properties: { sid: { type: "string" } },
       required: ["sid"]
     }
+  },
+  {
+    name: "trm.review",
+    description: "Detailed PR review from URL or diff.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string" },
+        diff: { type: "string" },
+        files: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+              content: { type: "string" },
+              orig: { type: "string" }
+            },
+            required: ["path", "content"]
+          }
+        },
+        focus: {
+          type: "array",
+          items: { type: "string" }
+        }
+      }
+    }
   }
 ];
