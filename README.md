@@ -52,7 +52,7 @@ npm run build
 }
 ```
 
-## Available Tools (16 Total)
+## Available Tools (17 Total)
 
 ### Core Tools
 
@@ -288,6 +288,297 @@ const review2 = await trm.reviewPR({
 });
 ```
 
+#### `trm.security`
+
+Comprehensive security analysis detecting OWASP Top 10 vulnerabilities, secrets, and security anti-patterns.
+
+**Parameters:**
+- `path` (required): Directory to analyze
+- `include`: Glob patterns to include (e.g., `["src/**/*.ts"]`)
+- `exclude`: Glob patterns to exclude (e.g., `["**/test/**"]`)
+- `focus`: Filter by category - `secrets`, `injection`, `xss`, `auth`, `crypto`, `config`, `mobile`
+- `severity`: Minimum severity to report - `critical`, `high`, `medium`, `low`
+
+**Vulnerability Categories:**
+
+| Category | Detects |
+|----------|---------|
+| `secrets` | Hardcoded API keys, passwords, AWS credentials, JWT secrets |
+| `injection` | SQL/NoSQL injection, command injection, eval(), template injection |
+| `xss` | dangerouslySetInnerHTML, innerHTML, v-html, document.write |
+| `auth` | Insecure token storage (localStorage), missing auth checks, JWT issues, weak cookies |
+| `crypto` | Disabled SSL, weak hashing (MD5/SHA1), Math.random() for security |
+| `config` | CORS wildcards, debug mode, stack trace exposure, sensitive data in logs |
+| `mobile` | AsyncStorage for secrets, deep link validation, cleartext traffic, WebView risks |
+
+**Positive Practices Detected:**
+- Secure storage (expo-secure-store, Keychain)
+- Parameterized SQL queries
+- Input sanitization (DOMPurify)
+- JWT verification with audience/issuer
+- Schema validation (Joi, Yup, Zod)
+- Rate limiting, CSRF protection, security headers
+- Certificate pinning
+
+**Returns:**
+```javascript
+{
+  vulnerabilities: [{
+    id: number,
+    title: string,
+    severity: "critical" | "high" | "medium" | "low",
+    owasp: "A01:2021-Broken Access Control" | ...,
+    status: "needs-fix" | "review",
+    location: { file: string, line?: number, snippet?: string },
+    issue: string,
+    risk: string[],
+    solution: string[]
+  }],
+  positivePractices: [{
+    title: string,
+    description: string,
+    location?: { file: string, line?: number }
+  }],
+  metrics: {
+    totalFilesAnalyzed: number,
+    securityRelatedFiles: number,
+    errorBoundaries: number,
+    secureStorageOps: number,
+    totalPatternsDetected: number,
+    antiPatternsFound: number
+  },
+  summary: { critical: number, high: number, medium: number, low: number, total: number },
+  recommendations: [{ priority: "immediate" | "high" | "medium" | "ongoing", description: string }]
+}
+```
+
+**Example:**
+```javascript
+// Full security audit
+const audit = await trm.security({
+  path: "/path/to/project"
+});
+
+console.log(`Found ${audit.summary.total} issues`);
+console.log(`Critical: ${audit.summary.critical}, High: ${audit.summary.high}`);
+
+// Focused analysis on auth and secrets
+const authAudit = await trm.security({
+  path: "/path/to/project",
+  focus: ["auth", "secrets"],
+  severity: "high"  // Only high and critical
+});
+
+// Mobile app security check
+const mobileAudit = await trm.security({
+  path: "/path/to/mobile-app",
+  focus: ["mobile", "auth", "crypto"],
+  exclude: ["**/node_modules/**", "**/__tests__/**"]
+});
+```
+
+**Output Format:**
+
+The tool returns both a formatted markdown report and structured JSON data:
+
+```
+## Security Analysis Summary
+
+| Severity | Count | Action Required |
+|----------|-------|-----------------|
+| CRITICAL | 2     | Immediate remediation |
+| High     | 3     | Immediate remediation |
+| Medium   | 5     | Address in next sprint |
+
+---
+## Positive Security Practices Observed
+
+1. **Secure Token Storage** (src/utils/secureStorage.ts)
+   Uses secure storage for sensitive tokens (iOS Keychain, Android Keystore)
+
+2. **Parameterized SQL Queries** (src/db/queries.ts)
+   Uses parameterized queries to prevent SQL injection
+
+---
+## Vulnerabilities Found
+
+### CRITICAL Severity
+
+#### 1. Hardcoded Secret/API Key
+**Severity:** CRITICAL
+**Location:** `src/config.ts:15`
+**OWASP:** A02:2021-Cryptographic Failures
+
+**Issue:** Hardcoded secret or API key detected
+
+**Risk:**
+- Secrets exposed in source control
+- Credential theft if code is leaked
+
+**Solution:**
+- Use environment variables
+- Use secrets manager (AWS Secrets Manager, HashiCorp Vault)
+
+---
+## Recommended Next Steps
+
+1. **Immediate (Critical):** Fix 2 critical issues: Hardcoded Secret/API Key, Command Injection
+2. **High Priority:** Address 3 high-severity issues
+3. **Ongoing:** Implement automated security scanning in CI/CD pipeline
+```
+
+**Example Prompts for Security Analysis:**
+
+Use these prompts with Claude Code, Cursor, or other MCP-enabled LLMs:
+
+```
+# Full security audit
+"Run a security analysis on this project and show me all vulnerabilities"
+
+# Pre-release security check
+"Before we deploy, scan the codebase for any hardcoded secrets or API keys"
+
+# Mobile app security
+"Analyze this React Native app for mobile security issues - focus on token storage and deep links"
+
+# Auth system review
+"Check our authentication code for security vulnerabilities - look at JWT handling, cookies, and session management"
+
+# OWASP compliance check
+"Scan for OWASP Top 10 vulnerabilities in the src directory"
+
+# Quick secrets scan
+"Do a quick scan for any hardcoded credentials or API keys that shouldn't be in the code"
+
+# Production readiness
+"Is this codebase secure enough for production? Check for critical and high severity issues only"
+```
+
+**Security-First Development Workflow:**
+
+```javascript
+// 1. Run security scan before starting work
+const initialAudit = await trm.security({
+  path: "/path/to/project",
+  severity: "high"  // Focus on critical issues first
+});
+
+if (initialAudit.summary.critical > 0) {
+  console.log("Fix critical security issues before proceeding:");
+  initialAudit.vulnerabilities
+    .filter(v => v.severity === "critical")
+    .forEach(v => console.log(`- ${v.title}: ${v.location?.file}`));
+}
+
+// 2. After implementing features, re-scan
+const postFeatureAudit = await trm.security({
+  path: "/path/to/project",
+  include: ["src/features/newFeature/**"]  // Scan only new code
+});
+
+// 3. Pre-commit security gate
+const preCommitAudit = await trm.security({
+  path: "/path/to/project",
+  focus: ["secrets", "injection"],  // Quick scan for worst issues
+  severity: "critical"
+});
+
+if (preCommitAudit.summary.total > 0) {
+  throw new Error("Cannot commit: critical security issues found");
+}
+```
+
+**Combining Security Analysis with TRM Iteration:**
+
+```javascript
+// Start TRM session
+const session = await trm.startSession({
+  repoPath: "/path/to/project",
+  buildCmd: "tsc --noEmit",
+  testCmd: "npm test",
+  halt: { maxSteps: 10, passThreshold: 0.95, patienceNoImprove: 3 }
+});
+
+// Run security scan to identify issues to fix
+const securityIssues = await trm.security({
+  path: "/path/to/project",
+  severity: "high"
+});
+
+// Iterate through security fixes
+for (const vuln of securityIssues.vulnerabilities) {
+  console.log(`Fixing: ${vuln.title} in ${vuln.location?.file}`);
+
+  // Read the problematic file
+  const { files } = await trm.getFileContent({
+    sessionId: session.sessionId,
+    paths: [vuln.location.file]
+  });
+
+  // Get context around the issue
+  if (vuln.location?.line) {
+    const context = await trm.getFileLines({
+      sessionId: session.sessionId,
+      file: vuln.location.file,
+      startLine: Math.max(1, vuln.location.line - 5),
+      endLine: vuln.location.line + 10
+    });
+    console.log("Context:", context.lines.join("\n"));
+  }
+
+  // Apply fix (LLM generates the actual fix based on vuln.solution)
+  // ... submit candidate with security fix ...
+
+  // Verify fix didn't break anything
+  const state = await trm.getState({ sessionId: session.sessionId });
+  if (state.last?.okBuild && state.last?.tests?.failed === 0) {
+    console.log(`✓ Fixed ${vuln.title} without breaking tests`);
+  }
+}
+
+// Final security verification
+const finalAudit = await trm.security({
+  path: "/path/to/project",
+  severity: "high"
+});
+console.log(`Security issues remaining: ${finalAudit.summary.total}`);
+```
+
+**CI/CD Integration Example:**
+
+```yaml
+# .github/workflows/security.yml
+name: Security Scan
+
+on: [push, pull_request]
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run MCP Security Scan
+        run: |
+          # Use the MCP server for security analysis
+          node -e "
+            import('./dist/analyzer/security-analyzer.js').then(async (mod) => {
+              const result = await mod.analyzeSecurityComprehensive('./src', {
+                minSeverity: 'high'
+              });
+
+              console.log('Security Scan Results:');
+              console.log('Critical:', result.summary.critical);
+              console.log('High:', result.summary.high);
+
+              if (result.summary.critical > 0) {
+                console.error('CRITICAL security issues found!');
+                process.exit(1);
+              }
+            });
+          "
+```
+
 ## Recommended Workflow
 
 ### 1. Start Session with Preflight
@@ -419,6 +710,7 @@ if (result.feedback.includes("line 145")) {
 | Auto-Suggest Fixes | 15-20% | - | TypeScript errors, common patterns |
 | Pre-Apply Validation | 20-30% | - | Catch errors before submission |
 | Error Correlation | 10-15% | - | Faster debugging with context |
+| Security Analysis | - | - | OWASP vulnerabilities, secrets detection |
 | **Combined Benefits** | **Up to 40%** | **30-50%** | **Overall efficiency improvement** |
 
 **Real-world impact:**
@@ -432,7 +724,7 @@ The MCP tool schemas have been optimized to minimize token usage while preservin
 
 **Optimization results:**
 - **4% reduction** in total MCP token usage (384 tokens saved)
-- **16 tools** optimized from 9,618 tokens to 9,234 tokens
+- **17 tools** optimized with concise schemas
 - **No functionality loss** - all parameters, types, and features unchanged
 
 **What was optimized:**
@@ -492,6 +784,10 @@ Iteration stops when:
 8. **Use `getFileLines`** for large files to save tokens
 9. **Try `suggestFix`** when stuck on TypeScript errors
 10. **Use `undoLastCandidate`** to quickly recover from bad changes
+11. **Run security scans** before deployment to catch hardcoded secrets and vulnerabilities
+12. **Focus security analysis** using `focus` param for faster targeted scans (e.g., `["secrets", "auth"]`)
+13. **Use severity filters** (`severity: "high"`) to prioritize critical issues first
+14. **Combine security + TRM** to fix vulnerabilities while ensuring tests still pass
 
 ## Architecture
 

@@ -306,5 +306,42 @@ export const tools: Tool[] = [
         }
       }
     }
+  },
+  {
+    name: "trm.security",
+    description: "Security analysis: OWASP vulnerabilities, secrets, XSS, injection, auth issues.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Directory to analyze"
+        },
+        include: {
+          type: "array",
+          items: { type: "string" },
+          description: "Glob patterns to include"
+        },
+        exclude: {
+          type: "array",
+          items: { type: "string" },
+          description: "Glob patterns to exclude"
+        },
+        focus: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: ["secrets", "injection", "xss", "auth", "crypto", "config", "mobile"]
+          },
+          description: "Focus areas: secrets, injection, xss, auth, crypto, config, mobile"
+        },
+        severity: {
+          type: "string",
+          enum: ["critical", "high", "medium", "low"],
+          description: "Minimum severity to report"
+        }
+      },
+      required: ["path"]
+    }
   }
 ];

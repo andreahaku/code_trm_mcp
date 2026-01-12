@@ -8,6 +8,7 @@ import { handleSaveCheckpoint, handleRestoreCheckpoint, handleListCheckpoints } 
 import { handleResetToBaseline } from "./baseline.js";
 import { handleSuggestFix } from "./fix.js";
 import { handleReviewPR } from "./pr-review.js";
+import { handleSecurityAnalysis } from "./security.js";
 
 /**
  * Handler registry for ultra-optimized schema (short tool names).
@@ -66,6 +67,10 @@ export async function handleToolCall(req: CallToolRequest) {
       // PR review
       case "trm.review":
         return await handleReviewPR(translatedArgs);
+
+      // Security analysis
+      case "trm.security":
+        return await handleSecurityAnalysis(translatedArgs);
 
       default:
         return { content: [{ type: "text", text: `Unhandled tool: ${req.params.name}` }] };

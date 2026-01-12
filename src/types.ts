@@ -369,3 +369,72 @@ export type PRReviewResponse = {
   suggestions: string[];
   prInfo?: { title?: string; url?: string };
 };
+
+// ============= SECURITY ANALYSIS TYPES =============
+
+export type SecuritySeverity = "critical" | "high" | "medium" | "low";
+
+export type OWASPCategory =
+  | "A01:2021-Broken Access Control"
+  | "A02:2021-Cryptographic Failures"
+  | "A03:2021-Injection"
+  | "A04:2021-Insecure Design"
+  | "A05:2021-Security Misconfiguration"
+  | "A06:2021-Vulnerable Components"
+  | "A07:2021-Auth Failures"
+  | "A08:2021-Software Integrity"
+  | "A09:2021-Logging Failures"
+  | "A10:2021-SSRF";
+
+export type SecurityVulnerability = {
+  id: number;
+  title: string;
+  severity: SecuritySeverity;
+  owasp?: OWASPCategory;
+  status: "needs-fix" | "review" | "acceptable";
+  location?: { file: string; line?: number; snippet?: string };
+  issue: string;
+  risk: string[];
+  solution: string[];
+  notes?: string;
+};
+
+export type PositiveSecurityPractice = {
+  title: string;
+  description: string;
+  location?: { file: string; line?: number };
+};
+
+export type SecurityMetrics = {
+  totalFilesAnalyzed: number;
+  securityRelatedFiles: number;
+  errorBoundaries: number;
+  secureStorageOps: number;
+  totalPatternsDetected: number;
+  antiPatternsFound: number;
+};
+
+export type SecurityAnalysisArgs = {
+  path: string;
+  include?: string[];
+  exclude?: string[];
+  focus?: ("secrets" | "injection" | "xss" | "auth" | "crypto" | "config" | "mobile")[];
+  severity?: SecuritySeverity;
+};
+
+export type SecurityAnalysisResponse = {
+  vulnerabilities: SecurityVulnerability[];
+  positivePractices: PositiveSecurityPractice[];
+  metrics: SecurityMetrics;
+  summary: {
+    critical: number;
+    high: number;
+    medium: number;
+    low: number;
+    total: number;
+  };
+  recommendations: {
+    priority: "immediate" | "high" | "medium" | "ongoing";
+    description: string;
+  }[];
+};
