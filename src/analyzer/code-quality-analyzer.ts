@@ -632,3 +632,37 @@ export async function analyzeCodeQuality(
     recommendations
   };
 }
+
+/**
+ * Analyze content directly (for PR review integration)
+ * @param content - File content to analyze
+ * @param filePath - File path (for context, doesn't need to exist on disk)
+ * @param threshold - Line count threshold (default: 500)
+ */
+export function analyzeContentQuality(
+  content: string,
+  filePath: string,
+  threshold: number = DEFAULT_THRESHOLD
+): LargeFileIssue | null {
+  const metrics = analyzeFileComplexity(content);
+
+  // Skip files under threshold
+  if (metrics.lineCount < threshold) {
+    return null;
+  }
+
+  const severity = determineSeverity(metrics.lineCount, threshold);
+  const items = extractItems(content);
+  const suggestions = generateSplitSuggestions(metrics, items, filePath);
+  const impact = generateImpact(metrics);
+
+  return {
+    id: 0, // Will be assigned by caller
+    file: filePath,
+    severity,
+    metrics,
+    issue: `File has ${metrics.lineCount} lines (${metrics.codeLines} code, ${metrics.commentLines} comments, ${metrics.blankLines} blank)`,
+    impact,
+    suggestions
+  };
+}

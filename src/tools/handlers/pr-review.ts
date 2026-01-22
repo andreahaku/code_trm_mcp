@@ -1,6 +1,8 @@
 import { execSync } from "child_process";
-import type { PRReviewArgs, PRReviewResponse, ReviewComment, ReviewSummary } from "../../types.js";
+import type { PRReviewArgs, PRReviewResponse, ReviewComment, ReviewSummary, SecurityVulnerability, LargeFileIssue } from "../../types.js";
 import { successResponse, errorResponse } from "./lib/response-utils.js";
+import { analyzeContentSecurity } from "../../analyzer/security-analyzer.js";
+import { analyzeContentQuality } from "../../analyzer/code-quality-analyzer.js";
 
 /**
  * Handler for trm.reviewPR tool.
@@ -33,23 +35,92 @@ export async function handleReviewPR(args: PRReviewArgs): Promise<any> {
     const issues: string[] = [];
     const suggestions: string[] = [];
 
+    // Security and code quality analysis
+    const allVulnerabilities: SecurityVulnerability[] = [];
+    const allPositivePractices: string[] = [];
+    const allLargeFiles: LargeFileIssue[] = [];
+    const codeQualityRecommendations: string[] = [];
+
     for (const fileChange of parsedDiff) {
-      // Analyze code quality issues
+      // Analyze code style issues
       const analysis = await analyzeFileChange(fileChange, args.focus);
       comments.push(...analysis.comments);
       issues.push(...analysis.issues);
       suggestions.push(...analysis.suggestions);
+
+      // Reconstruct file content from added lines for analysis
+      const fileContent = fileChange.addedLines.map(l => l.content).join("\n");
+
+      if (fileContent.length > 0) {
+        // Security analysis on the added content
+        const securityResult = analyzeContentSecurity(fileContent, fileChange.filePath);
+        if (securityResult.vulnerabilities.length > 0) {
+          // Renumber vulnerabilities to be unique across all files
+          const startId = allVulnerabilities.length + 1;
+          securityResult.vulnerabilities.forEach((v, i) => {
+            v.id = startId + i;
+          });
+          allVulnerabilities.push(...securityResult.vulnerabilities);
+        }
+        if (securityResult.positivePractices.length > 0) {
+          allPositivePractices.push(
+            ...securityResult.positivePractices.map(p => `${p.title} in ${fileChange.filePath}`)
+          );
+        }
+
+        // Code quality analysis - check if file would be large after changes
+        // For modified files, we need to estimate the total size
+        const estimatedTotalLines = fileChange.changeType === "added"
+          ? fileChange.addedLines.length
+          : fileChange.addedLines.length + 200; // Rough estimate for existing content
+
+        if (estimatedTotalLines >= 300) {
+          const qualityResult = analyzeContentQuality(fileContent, fileChange.filePath, 300);
+          if (qualityResult) {
+            qualityResult.id = allLargeFiles.length + 1;
+            allLargeFiles.push(qualityResult);
+          }
+        }
+      }
     }
 
-    // Generate summary
-    const summary: ReviewSummary = generateSummary(parsedDiff, comments, issues, suggestions);
+    // Generate code quality recommendations
+    if (allLargeFiles.length > 0) {
+      codeQualityRecommendations.push(
+        `${allLargeFiles.length} file(s) have significant size - consider code splitting`
+      );
+      const highSeverity = allLargeFiles.filter(f => f.severity === "high").length;
+      if (highSeverity > 0) {
+        codeQualityRecommendations.push(
+          `${highSeverity} file(s) are very large (>1000 lines) - refactoring recommended before merging`
+        );
+      }
+    }
+
+    // Generate summary with security and code quality info
+    const summary: ReviewSummary = generateSummary(
+      parsedDiff,
+      comments,
+      issues,
+      suggestions,
+      allVulnerabilities,
+      allLargeFiles
+    );
 
     const response: PRReviewResponse = {
       summary,
       comments,
       issues,
       suggestions,
-      prInfo
+      prInfo,
+      security: allVulnerabilities.length > 0 || allPositivePractices.length > 0 ? {
+        vulnerabilities: allVulnerabilities,
+        positives: allPositivePractices
+      } : undefined,
+      codeQuality: allLargeFiles.length > 0 ? {
+        largeFiles: allLargeFiles,
+        recommendations: codeQualityRecommendations
+      } : undefined
     };
 
     return successResponse(response);
@@ -356,7 +427,9 @@ function generateSummary(
   fileChanges: ParsedFileChange[],
   comments: ReviewComment[],
   issues: string[],
-  suggestions: string[]
+  suggestions: string[],
+  vulnerabilities: SecurityVulnerability[] = [],
+  largeFiles: LargeFileIssue[] = []
 ): ReviewSummary {
   const filesChanged = fileChanges.length;
   const linesAdded = fileChanges.reduce((sum, fc) => sum + fc.addedLines.length, 0);
@@ -366,13 +439,28 @@ function generateSummary(
   const warningCount = comments.filter(c => c.severity === "warning").length;
   const infoCount = comments.filter(c => c.severity === "info").length;
 
-  // Determine overall assessment
+  // Security summary
+  const securityIssues = {
+    critical: vulnerabilities.filter(v => v.severity === "critical").length,
+    high: vulnerabilities.filter(v => v.severity === "high").length,
+    medium: vulnerabilities.filter(v => v.severity === "medium").length,
+    low: vulnerabilities.filter(v => v.severity === "low").length,
+    total: vulnerabilities.length
+  };
+
+  // Code quality summary
+  const codeQualityIssues = {
+    largeFiles: largeFiles.length,
+    highSeverity: largeFiles.filter(f => f.severity === "high").length
+  };
+
+  // Determine overall assessment (now includes security)
   let assessment: "approved" | "needs-changes" | "comments";
-  if (criticalCount > 0 || issues.length > 0) {
+  if (criticalCount > 0 || issues.length > 0 || securityIssues.critical > 0 || securityIssues.high > 0) {
     assessment = "needs-changes";
-  } else if (warningCount > 5) {
+  } else if (warningCount > 5 || securityIssues.medium > 2) {
     assessment = "needs-changes";
-  } else if (comments.length > 0) {
+  } else if (comments.length > 0 || securityIssues.total > 0 || codeQualityIssues.largeFiles > 0) {
     assessment = "comments";
   } else {
     assessment = "approved";
@@ -393,6 +481,24 @@ function generateSummary(
     highlights.push(`High warning count: ${warningCount} warnings`);
   }
 
+  // Security highlights
+  if (securityIssues.critical > 0) {
+    highlights.push(`🔴 ${securityIssues.critical} CRITICAL security vulnerabilit${securityIssues.critical !== 1 ? 'ies' : 'y'}`);
+  }
+  if (securityIssues.high > 0) {
+    highlights.push(`🟠 ${securityIssues.high} high severity security issue${securityIssues.high !== 1 ? 's' : ''}`);
+  }
+  if (securityIssues.medium > 0) {
+    highlights.push(`🟡 ${securityIssues.medium} medium severity security issue${securityIssues.medium !== 1 ? 's' : ''}`);
+  }
+
+  // Code quality highlights
+  if (codeQualityIssues.highSeverity > 0) {
+    highlights.push(`📁 ${codeQualityIssues.highSeverity} very large file${codeQualityIssues.highSeverity !== 1 ? 's' : ''} (>1000 lines)`);
+  } else if (codeQualityIssues.largeFiles > 0) {
+    highlights.push(`📁 ${codeQualityIssues.largeFiles} large file${codeQualityIssues.largeFiles !== 1 ? 's' : ''} detected`);
+  }
+
   return {
     filesChanged,
     linesAdded,
@@ -402,6 +508,8 @@ function generateSummary(
     warningCount,
     infoCount,
     assessment,
-    highlights
+    highlights,
+    securityIssues,
+    codeQualityIssues
   };
 }

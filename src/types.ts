@@ -360,6 +360,19 @@ export type ReviewSummary = {
   infoCount: number;
   assessment: "approved" | "needs-changes" | "comments";
   highlights: string[];
+  // Security summary
+  securityIssues: {
+    critical: number;
+    high: number;
+    medium: number;
+    low: number;
+    total: number;
+  };
+  // Code quality summary
+  codeQualityIssues: {
+    largeFiles: number;
+    highSeverity: number;
+  };
 };
 
 export type PRReviewResponse = {
@@ -368,6 +381,16 @@ export type PRReviewResponse = {
   issues: string[];
   suggestions: string[];
   prInfo?: { title?: string; url?: string };
+  // Security analysis results
+  security?: {
+    vulnerabilities: SecurityVulnerability[];
+    positives: string[];
+  };
+  // Code quality results
+  codeQuality?: {
+    largeFiles: LargeFileIssue[];
+    recommendations: string[];
+  };
 };
 
 // ============= SECURITY ANALYSIS TYPES =============

@@ -735,6 +735,95 @@ async function analyzeFile(
 }
 
 /**
+ * Analyze content directly (for PR review integration)
+ * @param content - File content to analyze
+ * @param filePath - File path (for context, doesn't need to exist on disk)
+ * @param focusAreas - Optional areas to focus on
+ */
+export function analyzeContentSecurity(
+  content: string,
+  filePath: string,
+  focusAreas?: string[]
+): {
+  vulnerabilities: SecurityVulnerability[];
+  positivePractices: PositiveSecurityPractice[];
+} {
+  const vulnerabilities: SecurityVulnerability[] = [];
+  const positivePractices: PositiveSecurityPractice[] = [];
+
+  const lines = content.split(/\r?\n/);
+  const ext = path.extname(filePath).toLowerCase();
+
+  // Check vulnerability patterns
+  let vulnId = 0;
+  for (const pattern of VULNERABILITY_PATTERNS) {
+    // Filter by focus areas
+    if (focusAreas?.length && !focusAreas.includes(pattern.category)) {
+      continue;
+    }
+
+    // Check file type restrictions
+    if (pattern.fileTypes && !pattern.fileTypes.includes(ext)) {
+      continue;
+    }
+
+    // Search through lines
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+
+      // Skip if line matches exclude pattern
+      if (pattern.exclude && pattern.exclude.test(line)) {
+        continue;
+      }
+
+      if (pattern.pattern.test(line)) {
+        vulnId++;
+        vulnerabilities.push({
+          id: vulnId,
+          title: pattern.title,
+          severity: pattern.severity,
+          owasp: pattern.owasp,
+          status: pattern.severity === "low" ? "review" : "needs-fix",
+          location: {
+            file: filePath,
+            line: i + 1,
+            snippet: line.trim().slice(0, 100)
+          },
+          issue: pattern.issue,
+          risk: pattern.risk,
+          solution: pattern.solution
+        });
+        break; // One finding per pattern per file
+      }
+    }
+  }
+
+  // Check positive patterns
+  for (const pattern of POSITIVE_PATTERNS) {
+    // Check file type restrictions
+    if (pattern.fileTypes && !pattern.fileTypes.includes(ext)) {
+      continue;
+    }
+
+    for (let i = 0; i < lines.length; i++) {
+      if (pattern.pattern.test(lines[i])) {
+        positivePractices.push({
+          title: pattern.title,
+          description: pattern.description,
+          location: {
+            file: filePath,
+            line: i + 1
+          }
+        });
+        break; // One finding per pattern per file
+      }
+    }
+  }
+
+  return { vulnerabilities, positivePractices };
+}
+
+/**
  * Deduplicate positive practices (keep unique by title)
  */
 function deduplicatePositivePractices(
