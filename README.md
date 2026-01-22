@@ -52,7 +52,7 @@ npm run build
 }
 ```
 
-## Available Tools (17 Total)
+## Available Tools (18 Total)
 
 ### Core Tools
 
@@ -577,6 +577,141 @@ jobs:
               }
             });
           "
+```
+
+---
+
+### `trm.codeQuality` - Large File Detection & Code Splitting
+
+Analyzes codebase for large files that may benefit from splitting to improve maintainability, testability, and separation of concerns.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | ✅ | Directory to analyze |
+| `threshold` | number | ❌ | Line count threshold (default: 500) |
+| `include` | string[] | ❌ | Glob patterns to include (e.g., `["**/*.ts"]`) |
+| `exclude` | string[] | ❌ | Glob patterns to exclude (e.g., `["**/node_modules/**"]`) |
+
+**Severity Levels:**
+
+| Severity | Line Range | Action |
+|----------|------------|--------|
+| 🔴 HIGH | >1000 lines | Requires immediate attention |
+| 🟠 Medium | 700-1000 lines | Should be refactored |
+| 🟡 Low | 500-700 lines | Consider splitting |
+
+**Metrics Analyzed:**
+
+- **Line counts**: Total, code, comments, blank lines
+- **Complexity**: Classes, functions, exports, imports
+- **Function metrics**: Max length, average length
+- **Nesting depth**: Maximum nesting levels
+
+**Suggestion Types:**
+
+| Type | Description |
+|------|-------------|
+| 📦 Extract Class | Move class and related methods to new file |
+| ⚡ Extract Functions | Group related utility functions |
+| 📁 Split Module | Separate concerns into modules |
+| 🔧 Extract Constants | Move constants to dedicated file |
+| 📝 Extract Types | Move type definitions to types file |
+
+**Example Usage:**
+
+```javascript
+// Basic analysis with default threshold (500 lines)
+const result = await trm.codeQuality({
+  path: "/path/to/project/src"
+});
+
+// Custom threshold and filters
+const result = await trm.codeQuality({
+  path: "/path/to/project",
+  threshold: 300,
+  include: ["**/*.ts", "**/*.tsx"],
+  exclude: ["**/*.test.ts", "**/generated/**"]
+});
+```
+
+**Example Output:**
+
+```
+## Code Quality Analysis - Large File Detection
+
+**Threshold:** 500 lines
+
+### Summary
+
+| Severity | Count | Line Range |
+|----------|-------|------------|
+| HIGH | 1 | >1000 lines |
+| Medium | 2 | 700-1000 lines |
+| Low | 3 | 500-700 lines |
+
+**Total files over threshold:** 6 of 44 analyzed
+
+### Codebase Metrics
+
+| Metric | Value |
+|--------|-------|
+| Total Files Analyzed | 44 |
+| Files Over Threshold | 6 |
+| Average File Size | 192 lines |
+| Largest File | 910 lines |
+| Total Code Lines | 8,450 |
+
+---
+### Large Files Requiring Attention
+
+#### 1. 🔴 `src/analyzer/security-analyzer.ts`
+**Severity:** HIGH | **Lines:** 910
+
+**File Composition:**
+- Code: 750 lines | Comments: 85 | Blank: 75
+- Classes: 0 | Functions: 25 | Exports: 5 | Imports: 8
+
+**Impact:**
+- Difficult to test individual security patterns
+- Changes risk unintended side effects
+- Code review overhead increased
+
+**Suggested Splits:**
+- **📦 Extract Class:** Create SecurityPatternMatcher class
+  - Items: `detectSecrets`, `detectInjection`, `detectXSS`
+  - Estimated reduction: ~300 lines
+- **📁 Split Module:** Separate patterns by category
+  - Items: `secrets-patterns.ts`, `injection-patterns.ts`
+  - Estimated reduction: ~400 lines
+```
+
+**Example Prompts:**
+
+```
+"Analyze my codebase for large files that should be split"
+
+"Find all files over 300 lines and suggest how to refactor them"
+
+"Check src/services for maintainability issues"
+
+"What files in my project are too complex and need splitting?"
+```
+
+**Integration with Development Workflow:**
+
+```typescript
+// Pre-commit check for file size
+const quality = await trm.codeQuality({
+  path: "./src",
+  threshold: 500
+});
+
+if (quality.summary.high > 0) {
+  console.error("Files over 1000 lines need refactoring before commit");
+  process.exit(1);
+}
 ```
 
 ## Recommended Workflow

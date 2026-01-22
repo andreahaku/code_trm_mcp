@@ -343,5 +343,33 @@ export const tools: Tool[] = [
       },
       required: ["path"]
     }
+  },
+  {
+    name: "trm.codeQuality",
+    description: "Detect large files (>500 lines) and suggest code splitting for maintainability.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Directory to analyze"
+        },
+        threshold: {
+          type: "number",
+          description: "Line count threshold (default: 500)"
+        },
+        include: {
+          type: "array",
+          items: { type: "string" },
+          description: "Glob patterns to include"
+        },
+        exclude: {
+          type: "array",
+          items: { type: "string" },
+          description: "Glob patterns to exclude"
+        }
+      },
+      required: ["path"]
+    }
   }
 ];

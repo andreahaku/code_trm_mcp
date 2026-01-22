@@ -9,6 +9,7 @@ import { handleResetToBaseline } from "./baseline.js";
 import { handleSuggestFix } from "./fix.js";
 import { handleReviewPR } from "./pr-review.js";
 import { handleSecurityAnalysis } from "./security.js";
+import { handleCodeQualityAnalysis } from "./code-quality.js";
 
 /**
  * Handler registry for ultra-optimized schema (short tool names).
@@ -71,6 +72,10 @@ export async function handleToolCall(req: CallToolRequest) {
       // Security analysis
       case "trm.security":
         return await handleSecurityAnalysis(translatedArgs);
+
+      // Code quality analysis
+      case "trm.codeQuality":
+        return await handleCodeQualityAnalysis(translatedArgs);
 
       default:
         return { content: [{ type: "text", text: `Unhandled tool: ${req.params.name}` }] };

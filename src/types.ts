@@ -438,3 +438,63 @@ export type SecurityAnalysisResponse = {
     description: string;
   }[];
 };
+
+// ============= CODE QUALITY TYPES =============
+
+export type CodeQualitySeverity = "high" | "medium" | "low";
+
+export type FileComplexityMetrics = {
+  lineCount: number;
+  codeLines: number;
+  commentLines: number;
+  blankLines: number;
+  classes: number;
+  functions: number;
+  exports: number;
+  imports: number;
+  maxFunctionLength: number;
+  avgFunctionLength: number;
+  nestingDepth: number;
+};
+
+export type LargeFileIssue = {
+  id: number;
+  file: string;
+  severity: CodeQualitySeverity;
+  metrics: FileComplexityMetrics;
+  issue: string;
+  impact: string[];
+  suggestions: SplitSuggestion[];
+};
+
+export type SplitSuggestion = {
+  type: "extract-class" | "extract-functions" | "extract-module" | "extract-constants" | "extract-types";
+  description: string;
+  targetItems?: string[];
+  estimatedLines?: number;
+};
+
+export type CodeQualityAnalysisArgs = {
+  path: string;
+  threshold?: number;
+  include?: string[];
+  exclude?: string[];
+};
+
+export type CodeQualityAnalysisResponse = {
+  largeFiles: LargeFileIssue[];
+  metrics: {
+    totalFilesAnalyzed: number;
+    filesOverThreshold: number;
+    avgFileSize: number;
+    maxFileSize: number;
+    totalCodeLines: number;
+  };
+  summary: {
+    high: number;
+    medium: number;
+    low: number;
+    total: number;
+  };
+  recommendations: string[];
+};
