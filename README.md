@@ -224,7 +224,7 @@ await trm.submitCandidate({
 
 #### `trm.reviewPR`
 
-Perform detailed code review on pull requests from GitHub URLs or direct diffs.
+Comprehensive code review combining style checks, **security analysis**, and **code quality analysis** on pull requests.
 
 **Parameters:**
 - `prUrl`: GitHub PR URL (e.g., `https://github.com/owner/repo/pull/123`)
@@ -242,6 +242,10 @@ Perform detailed code review on pull requests from GitHub URLs or direct diffs.
 - `testing`: Suggest adding tests
 - `size`: Flag large changesets
 
+**Integrated Analysis:**
+- **Security scanning**: OWASP vulnerabilities, secrets, injection, XSS, auth issues (from `trm.security`)
+- **Code quality**: Large file detection, code splitting suggestions (from `trm.codeQuality`)
+
 **Returns:**
 ```javascript
 {
@@ -254,7 +258,20 @@ Perform detailed code review on pull requests from GitHub URLs or direct diffs.
     warningCount: number,
     infoCount: number,
     assessment: "approved" | "needs-changes" | "comments",
-    highlights: string[]
+    highlights: string[],
+    // Security summary
+    securityIssues: {
+      critical: number,
+      high: number,
+      medium: number,
+      low: number,
+      total: number
+    },
+    // Code quality summary
+    codeQualityIssues: {
+      largeFiles: number,
+      highSeverity: number
+    }
   },
   comments: [{
     file: string,
@@ -266,25 +283,45 @@ Perform detailed code review on pull requests from GitHub URLs or direct diffs.
   }],
   issues: string[],
   suggestions: string[],
-  prInfo?: { title?: string, url?: string }
+  prInfo?: { title?: string, url?: string },
+  // Security analysis results
+  security?: {
+    vulnerabilities: SecurityVulnerability[],
+    positives: string[]
+  },
+  // Code quality results
+  codeQuality?: {
+    largeFiles: LargeFileIssue[],
+    recommendations: string[]
+  }
 }
 ```
 
+**Assessment Logic:**
+- `needs-changes`: Critical/high security issues, or >5 warnings, or >2 medium security issues
+- `comments`: Any security issues or large files detected
+- `approved`: No significant issues found
+
 **Example:**
 ```javascript
-// Review from GitHub URL
+// Review from GitHub URL - includes security + code quality
 const review = await trm.reviewPR({
-  prUrl: "https://github.com/owner/repo/pull/123",
-  focus: ["type-safety", "error-handling", "code-quality"]
+  prUrl: "https://github.com/owner/repo/pull/123"
 });
 
 console.log(`Assessment: ${review.summary.assessment}`);
-console.log(`Found ${review.comments.length} comments`);
+console.log(`Security issues: ${review.summary.securityIssues.total}`);
+console.log(`Large files: ${review.summary.codeQualityIssues.largeFiles}`);
+
+// Check for critical security issues
+if (review.security?.vulnerabilities.some(v => v.severity === "critical")) {
+  console.log("⚠️ Critical security vulnerabilities found!");
+}
 
 // Review from direct diff
 const review2 = await trm.reviewPR({
   diff: "diff --git a/file.ts...",
-  focus: ["logging", "todos"]
+  focus: ["type-safety", "error-handling"]
 });
 ```
 
